@@ -577,6 +577,21 @@ function downloadMd(filename, text) {
 }
 
 // 점검 결과 → AI 코딩 어시스턴트에 그대로 붙여넣는 "수정 명령서" 마크다운 생성
+// 발견 여부와 무관하게 항상 적용해야 하는 기본 보안 하드닝 기준선
+const BASELINE_HARDENING = [
+  ['전송 구간 암호화', '평문 통신은 도청·변조에 취약합니다.', '모든 HTTP 요청을 HTTPS 로 301 리다이렉트하고, HSTS(max-age=31536000; includeSubDomains; preload)와 TLS 1.2 이상만 허용하도록 설정합니다.'],
+  ['보안 응답 헤더 전체 적용', '브라우저 보호 기능이 꺼져 있으면 XSS·클릭재킹·MIME 공격에 노출됩니다.', "CSP(default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none', 가능하면 nonce 기반으로 unsafe-inline 제거), X-Content-Type-Options: nosniff, Referrer-Policy: strict-origin-when-cross-origin, Permissions-Policy(불필요 기능 차단), X-Frame-Options: DENY 를 모든 응답에 추가합니다."],
+  ['쿠키·세션 보안', '플래그 없는 세션 쿠키는 탈취·CSRF 에 취약합니다.', '세션 쿠키에 Secure; HttpOnly; SameSite=Lax(또는 Strict) 를 적용하고, 로그인 시 세션 ID 를 재발급(세션 고정 방지)하며 적절한 만료를 둡니다. 가능하면 __Host- 접두를 사용합니다.'],
+  ['비밀정보 관리', '코드·프론트엔드 번들·저장소에 노출된 키는 즉시 악용됩니다.', '모든 API 키·토큰·DB 자격증명을 코드에서 제거하고 환경변수 또는 시크릿 매니저로 옮깁니다. .env 와 키 파일은 .gitignore 에 추가하고, 이미 노출된 비밀은 반드시 폐기 후 재발급합니다. 프론트엔드 번들에는 어떤 비밀도 두지 않습니다.'],
+  ['의존성·패치 관리', '구버전 라이브러리는 공개된 익스플로잇으로 즉시 침해됩니다.', '취약 의존성을 안전한 최소 버전으로 올리고, lockfile 을 커밋하며, 자동 취약점 점검(npm audit / pip-audit / Dependabot 등)을 CI 에 연결합니다. 미사용 의존성은 제거합니다.'],
+  ['입력 검증·출력 인코딩', '검증되지 않은 입력은 인젝션·XSS 의 통로입니다.', 'DB 접근은 파라미터화 쿼리(Prepared Statement)만 사용하고, 사용자 입력을 화면에 출력할 때 컨텍스트에 맞게 인코딩하며, 파일 업로드는 타입·크기·경로를 검증합니다.'],
+  ['인증·인가', '서버측 인가 누락은 권한 상승으로 이어집니다.', '모든 보호 리소스에 서버측 인가 검사를 두고, 관리자/디버그 인터페이스는 인증·IP 제한 뒤에 둡니다. 토큰은 만료를 두고 서명 알고리즘을 고정 검증하며, 가능하면 다중인증(MFA)을 적용합니다.'],
+  ['CORS 정책', '느슨한 CORS 는 교차 출처 데이터 탈취를 허용합니다.', '와일드카드(*)와 자격증명(credentials) 조합을 금지하고, 허용 출처는 정확 일치로 검증하며 null origin 을 허용하지 않습니다.'],
+  ['남용 방지', '무차별 대입·자동화 공격은 인증·민감 엔드포인트를 노립니다.', '로그인·비밀번호 재설정·결제 등 민감 엔드포인트에 레이트리밋과 계정 잠금/캡차를 적용합니다.'],
+  ['정보 노출 최소화', '상세 오류·버전·내부 파일 노출은 정찰을 돕습니다.', '운영 환경에서 상세 스택트레이스를 숨기고, 서버 버전 헤더(Server, X-Powered-By)를 제거하며, 디렉터리 인덱싱을 끄고 .git·.env·백업 파일에 대한 외부 접근을 차단합니다.'],
+  ['로깅·모니터링·백업', '탐지·복구 체계가 없으면 사고가 장기화됩니다.', '인증 실패·권한 변경 등 보안 이벤트를 로깅(민감정보는 마스킹)하고, 정기 백업과 복구 테스트로 랜섬웨어·데이터 손실에 대비합니다.'],
+];
+
 function buildFixPrompt(findings, target) {
   const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
   const sorted = [...findings].sort((a, b) => (order[a.severity] - order[b.severity]) || ((b.riskScore || 0) - (a.riskScore || 0)));
@@ -586,23 +601,53 @@ function buildFixPrompt(findings, target) {
   const score = findings.length ? Math.round(max * 0.7 + Math.min(100, Math.log2(sum + 1) * 8) * 0.3) : 0;
 
   const L = [];
-  L.push('# 🤖 보안 취약점 수정 명령서 (AI 프롬프트)', '');
-  L.push('> 이 문서를 그대로 AI 코딩 어시스턴트(Cursor · Copilot 등)에 붙여넣으세요.');
-  L.push('> AI가 아래 취약점을 우선순위에 따라 안전하게 수정합니다.', '');
-  L.push('## 역할');
-  L.push('당신은 시니어 애플리케이션 보안 엔지니어입니다. SENTINEL-ASM 보안 점검에서 발견된 아래 취약점을 코드/설정 수정으로 해결하세요.', '');
-  L.push('## 작업 지침');
-  L.push('1. **치명적 → 심각 → 주의** 순으로 처리하고, 각 항목마다 무엇을 왜 바꾸는지 한 줄로 설명하세요.');
-  L.push('2. 기존 기능을 깨뜨리지 않도록 최소 변경으로 수정하고, 변경한 파일 경로와 diff(또는 전체 코드)를 제시하세요.');
-  L.push('3. 실제 사용 중인 프레임워크/서버(nginx · Express · Spring · Apache 등)에 맞는 구체적 설정·코드로 작성하세요.');
-  L.push('4. 비밀정보(.env · 키 · 토큰)가 노출된 항목은 **노출 차단 + 해당 키의 폐기·재발급**까지 안내하세요.');
-  L.push('5. 의존성 취약점(CVE)은 안전한 최소 상향 버전을 명시하고 호환성 주의사항을 덧붙이세요.');
-  L.push('6. 모든 수정 후 각 항목의 해결 여부를 확인하는 **검증 방법**을 제시하세요.', '');
-  L.push('## 점검 개요');
+  L.push('# 🤖 보안 개선 명령서 (AI 코딩 도구용)', '');
+  L.push('> **사용법 — 보안을 잘 몰라도 됩니다.** 이 문서를 그대로 복사해, 이 코드를 만들 때 쓴 AI 코딩 도구');
+  L.push('> (Cursor · Copilot 등)에 붙여넣고 다음과 같이 요청하세요:');
+  L.push('> *"이 보안 개선 명령서대로, 우선순위에 따라 코드와 설정을 수정해줘. 기존 기능은 깨지 않게 최소 변경으로 하고,');
+  L.push('> 바꾼 파일과 그 이유, 그리고 각 항목을 어떻게 검증하는지 알려줘."*', '');
+  L.push('> 그러면 AI 가 아래 ① 기본 보안 기준선과 ② 발견된 문제를 함께 수정하여 보안 수준을 끌어올립니다.', '');
+
+  L.push('## 0. 역할과 원칙 (AI 에게)');
+  L.push('당신은 시니어 애플리케이션 보안 엔지니어입니다. 아래를 준수하여 이 프로젝트의 보안을 **엄격하게** 상향하세요.');
+  L.push('1. **치명적 → 심각 → 주의** 순으로 처리하고, 각 변경마다 *무엇을 왜* 바꾸는지 한 줄로 설명합니다.');
+  L.push('2. 기존 기능을 깨뜨리지 않도록 **최소 변경**으로 수정하고, 변경 파일 경로와 diff(또는 전체 코드)를 제시합니다.');
+  L.push('3. 프로젝트가 실제로 쓰는 언어/프레임워크/서버(예: Express · Next.js · Spring · Django · nginx)를 **먼저 파악한 뒤** 그에 맞는 구체적 코드·설정으로 작성합니다. 아래 예시는 참고용이며 스택에 맞게 변환하세요.');
+  L.push('4. 비밀정보(.env · 키 · 토큰)가 노출된 경우, 코드에서 제거하는 것에 더해 **해당 키를 즉시 폐기하고 재발급**하도록 사용자에게 명확히 지시합니다.');
+  L.push('5. 의존성 취약점은 **안전한 최소 상향 버전**을 명시하고, 호환성에 영향이 있으면 주의사항을 덧붙입니다.');
+  L.push('6. 수정 후 각 항목의 해결 여부를 확인하는 **구체적 검증 방법**(명령·요청 예시)을 제시합니다.', '');
+
+  L.push('## 1. 점검 개요');
   L.push(`- 대상: ${target || '-'}`);
-  L.push(`- 종합 위험도: ${score}/100`);
+  L.push(`- 종합 위험도: **${score}/100**`);
   L.push(`- 발견: 총 ${findings.length}건 (치명적 ${counts.critical} · 심각 ${counts.high} · 주의 ${counts.medium} · 경미 ${counts.low} · 정보 ${counts.info})`, '');
-  L.push('## 수정 대상 취약점');
+
+  L.push('## 2. 기본 보안 기준선 (필수 — 발견 여부와 무관하게 모두 적용)');
+  L.push('아래 항목은 강력한 기본 방어선입니다. 이미 적용된 것은 확인만 하고, 빠진 것은 모두 적용하세요.', '');
+  BASELINE_HARDENING.forEach(([title, why, how], i) => {
+    L.push(`**${i + 1}. ${title}**`);
+    L.push(`- 왜: ${why}`);
+    L.push(`- 어떻게: ${how}`, '');
+  });
+  L.push('### 참고 예시 (스택에 맞게 변환하여 적용)');
+  L.push('```nginx');
+  L.push('# nginx — HTTPS 강제 + 보안 헤더');
+  L.push('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;');
+  L.push('add_header X-Content-Type-Options "nosniff" always;');
+  L.push('add_header X-Frame-Options "DENY" always;');
+  L.push('add_header Referrer-Policy "strict-origin-when-cross-origin" always;');
+  L.push("add_header Content-Security-Policy \"default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'\" always;");
+  L.push('```');
+  L.push('```js');
+  L.push('// Node/Express — helmet 로 보안 헤더 일괄 적용 + 쿠키 플래그');
+  L.push("const helmet = require('helmet'); app.use(helmet());");
+  L.push("res.cookie('sid', value, { secure: true, httpOnly: true, sameSite: 'lax' });");
+  L.push('```', '');
+
+  L.push('## 3. 이번 점검에서 발견된 문제와 해결책 (우선순위 순)');
+  if (!sorted.length) {
+    L.push('- 발견된 개별 취약점은 없습니다. 위 2장의 기본 기준선을 점검·적용하세요.', '');
+  }
   sorted.forEach((f, i) => {
     const e = explainFinding(f);
     L.push('', `### ${i + 1}. [${SEV_KO[f.severity] || f.severity}] ${f.title}`);
@@ -613,15 +658,25 @@ function buildFixPrompt(findings, target) {
     L.push(`- **왜 위험한가**: ${e.why}`);
     L.push(`- **공격 시나리오**: ${e.attacker}`);
     L.push(`- **비즈니스 피해**: ${e.business}`);
-    L.push(`- **요구 수정 (지시)**: ${e.action}`);
+    L.push(`- **해결책 (이렇게 고치세요)**: ${e.action}`);
     if (f.references?.length) L.push(`- **참고 표준**: ${f.references.join(' , ')}`);
-    L.push('- **완료 기준**: 위 수정을 적용해 재점검 시 본 항목이 더 이상 탐지되지 않아야 합니다.');
+    L.push('- **완료 기준**: 위 수정 적용 후 재점검 시 본 항목이 더 이상 탐지되지 않아야 합니다.');
   });
-  L.push('', '## 완료 후 보고');
+  L.push('');
+
+  L.push('## 4. 결정적 실행 순서 (이 순서대로 해결하세요)');
+  L.push('1. **즉시(치명적·KEV)** — 노출된 비밀키 폐기·재발급, 알려진 악용 취약점(KEV) 패치, 외부 노출된 민감 파일/경로 차단.');
+  L.push('2. **긴급(심각)** — 인증·인가·접근통제 결함, 원격코드실행·인젝션 표면, 관리 인터페이스 노출 제거.');
+  L.push('3. **기준선 전면 적용** — 위 2장의 기본 보안 기준선(전송 암호화·보안 헤더·쿠키·CORS·의존성)을 일괄 반영.');
+  L.push('4. **재점검(검증)** — 동일 대상을 다시 점검하여 각 항목이 더 이상 탐지되지 않는지(차분=해소) 확인.');
+  L.push('5. **정기화** — 위 과정을 배포 파이프라인에 통합하여 새 취약점이 누적되지 않도록 지속 관리.', '');
+
+  L.push('## 5. 완료 후 보고 (AI 가 작성)');
   L.push('- 항목별로 (1) 적용한 수정 (2) 변경 파일 (3) 검증 방법을 표로 정리하세요.');
+  L.push('- 기본 기준선 중 적용/이미충족/미적용 항목을 구분해 알려주세요.');
   L.push('- 수정으로 영향받을 수 있는 기능과 회귀 테스트 포인트를 알려주세요.', '');
   L.push('---');
-  L.push('_SENTINEL-ASM 자동 생성 · 권한이 검증된 본인 자산에 한해 수정·점검하세요._');
+  L.push('_SENTINEL-ASM 자동 생성 · 권한이 검증된 본인 자산에 한해 수정·점검하세요. 비밀키가 노출되었다면 코드 수정만으로 끝내지 말고 반드시 키를 재발급하세요._');
   return L.join('\n');
 }
 
