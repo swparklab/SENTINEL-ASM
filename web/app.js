@@ -1,0 +1,1080 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import htm from 'htm';
+
+const html = htm.bind(React.createElement);
+
+// ───────────────────────── API 클라이언트 ─────────────────────────
+const tokenStore = {
+  get: () => localStorage.getItem('sentinel_token'),
+  set: (t) => localStorage.setItem('sentinel_token', t),
+  clear: () => localStorage.removeItem('sentinel_token'),
+};
+
+async function api(method, path, body) {
+  const headers = {};
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  const t = tokenStore.get();
+  if (t) headers['authorization'] = `Bearer ${t}`;
+  const res = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+  let json; try { json = await res.json(); } catch { json = null; }
+  if (res.status === 401) { tokenStore.clear(); location.hash = '#/login'; }
+  return { status: res.status, ok: res.ok, json };
+}
+
+// ───────────────────────── 공용 UI ─────────────────────────
+const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+const SEV_KO = { critical: '치명적', high: '심각', medium: '주의', low: '경미', info: '정보' };
+const SEV_COLOR = { critical: '#dc2626', high: '#ea580c', medium: '#ca8a04', low: '#16a34a', info: '#2563eb' };
+const fmt = (iso) => iso ? new Date(iso).toLocaleString('ko-KR', { hour12: false }) : '-';
+const Sev = ({ s }) => html`<span class=${`badge sev-${s}`}>${SEV_KO[s] || s.toUpperCase()}</span>`;
+const Status = ({ s }) => html`<span class=${`st-${s}`}>${s}</span>`;
+
+function useToast() {
+  const [toast, setToast] = useState(null);
+  const show = useCallback((msg, err = false) => {
+    setToast({ msg, err });
+    setTimeout(() => setToast(null), 3500);
+  }, []);
+  const node = toast ? html`<div class=${`toast ${toast.err ? 'err' : ''}`}>${toast.msg}</div>` : null;
+  return [node, show];
+}
+
+// ───────────────────────── 로그인 ─────────────────────────
+function Login({ onLogin }) {
+  const [email, setEmail] = useState('admin@hanbit.example');
+  const [password, setPassword] = useState('sentinel!admin');
+  const [err, setErr] = useState('');
+  const submit = async (e) => {
+    e.preventDefault();
+    const r = await api('POST', '/api/auth/login', { email, password });
+    if (r.ok) { tokenStore.set(r.json.token); onLogin(r.json.user); location.hash = '#/'; }
+    else setErr(r.json?.message || '로그인 실패');
+  };
+  const quick = (em, pw) => { setEmail(em); setPassword(pw); };
+  return html`
+    <div class="login-wrap">
+      <form class="login-card" onSubmit=${submit}>
+        <h1>🛡 SENTINEL-ASM</h1>
+        <div class="sub">권한 검증 기반 공격표면관리 · 취약점 점검 · 컴플라이언스</div>
+        <label>이메일</label>
+        <input value=${email} onChange=${(e) => setEmail(e.target.value)} />
+        <label>비밀번호</label>
+        <input type="password" value=${password} onChange=${(e) => setPassword(e.target.value)} />
+        ${err && html`<div class="no" style=${{ marginTop: 10 }}>${err}</div>`}
+        <button class="primary" style=${{ width: '100%', marginTop: 18 }}>로그인</button>
+        <div class="accounts">
+          데모 계정 (클릭 시 자동 입력):<br/>
+          <code onClick=${() => quick('admin@hanbit.example', 'sentinel!admin')}>admin@hanbit.example</code> · admin<br/>
+          <code onClick=${() => quick('scanner@hanbit.example', 'sentinel!scan')}>scanner@hanbit.example</code> · scanner<br/>
+          <code onClick=${() => quick('auditor@hanbit.example', 'sentinel!audit')}>auditor@hanbit.example</code> · auditor<br/>
+          <code onClick=${() => quick('viewer@hanbit.example', 'sentinel!view')}>viewer@hanbit.example</code> · viewer
+        </div>
+      </form>
+    </div>`;
+}
+
+// ───────────────────────── 대시보드 ─────────────────────────
+function Dashboard() {
+  const [d, setD] = useState(null);
+  useEffect(() => { api('GET', '/api/dashboard').then((r) => setD(r.json)); }, []);
+  if (!d) return html`<div class="muted">로딩 중…</div>`;
+  const counts = d.risk.counts || {};
+  return html`
+    <div class="grid cards">
+      <div class="card"><div class="k">등록 자산</div><div class="v">${d.assets.total}</div>
+        <div class="muted">검증 ${d.assets.verified} · 미검증 ${d.assets.unverified}</div></div>
+      <div class="card"><div class="k">점검 작업</div><div class="v">${d.scans.total}</div>
+        <div class="muted">완료 ${d.scans.completed} · 진행 ${d.scans.queuedOrRunning} · 차단 ${d.scans.rejected}</div></div>
+      <div class="card"><div class="k">종합 위험도</div><div class="v">${d.risk.score}<span class="muted" style=${{ fontSize: 14 }}>/100</span></div>
+        <div class="bar" style=${{ marginTop: 8 }}><i style=${{ width: `${d.risk.score}%` }}></i></div></div>
+      <div class="card"><div class="k">위험 분포</div>
+        <div style=${{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          ${SEV_ORDER.map((s) => html`<span key=${s} class=${`badge sev-${s}`}>${(counts[s] || 0)} ${s[0].toUpperCase()}</span>`)}
+        </div></div>
+    </div>
+    ${d.trend?.length > 1 && html`<div class="panel" style=${{ marginTop: 16 }}>
+      <h3>위험도 추세 (최근 점검 ${d.trend.length}건)</h3>
+      <${TrendChart} points=${d.trend} />
+    </div>`}
+    <div class="grid" style=${{ gridTemplateColumns: '1fr 1fr', marginTop: 16 }}>
+      <div class="panel" style=${{ margin: 0 }}>
+        <h3>자산별 위험도</h3>
+        <table><thead><tr><th>자산</th><th>중요도</th><th>위험도</th><th>발견</th></tr></thead><tbody>
+          ${(d.assetRisk || []).map((a) => html`<tr key=${a.asset}>
+            <td><b>${a.asset}</b></td><td class="muted">${a.criticality}</td>
+            <td><${Sev} s=${a.band} /> <span class="muted">${a.score}</span></td><td>${a.findings}</td></tr>`)}
+          ${!d.assetRisk?.length && html`<tr><td colSpan="4" class="muted">완료된 점검 없음</td></tr>`}
+        </tbody></table>
+      </div>
+      <div class="panel" style=${{ margin: 0 }}>
+        <h3>전체 상위 위험</h3>
+        <table><thead><tr><th>위험</th><th>등급</th><th>항목</th></tr></thead><tbody>
+          ${(d.topFindings || []).map((f, i) => html`<tr key=${i}>
+            <td><b>${f.riskScore}</b></td><td><${Sev} s=${f.severity} /></td>
+            <td>${f.title}<div class="muted mono" style=${{ fontSize: 11 }}>${f.target}</div></td></tr>`)}
+          ${!d.topFindings?.length && html`<tr><td colSpan="3" class="muted">발견 없음</td></tr>`}
+        </tbody></table>
+      </div>
+    </div>
+    <div class="panel" style=${{ marginTop: 16 }}>
+      <h3>최근 점검 작업</h3>
+      <table><thead><tr><th>작업</th><th>자산</th><th>강도</th><th>상태</th><th>발견</th><th>요청시각</th></tr></thead>
+        <tbody>${d.recentJobs.map((j) => html`<tr key=${j.id}>
+          <td class="mono">${j.id.slice(0, 12)}</td><td class="mono">${j.assetId.slice(0, 14)}</td>
+          <td><span class="pill">${j.intensity}</span></td><td><${Status} s=${j.status} /></td>
+          <td>${j.findings}</td><td class="muted">${fmt(j.queuedAt)}</td></tr>`)}
+          ${!d.recentJobs.length && html`<tr><td colSpan="6" class="muted">작업 없음</td></tr>`}
+        </tbody></table>
+    </div>`;
+}
+
+// 위험도 추세 — 인라인 SVG 라인 차트
+function TrendChart({ points }) {
+  const W = 720, H = 120, P = 24;
+  const xs = (i) => P + (i * (W - 2 * P)) / Math.max(1, points.length - 1);
+  const ys = (v) => H - P - (v / 100) * (H - 2 * P);
+  const path = points.map((p, i) => `${i ? 'L' : 'M'}${xs(i).toFixed(1)},${ys(p.score).toFixed(1)}`).join(' ');
+  return html`<svg viewBox=${`0 0 ${W} ${H}`} style=${{ width: '100%', height: 130 }}>
+    ${[0, 25, 50, 75, 100].map((g) => html`<g key=${g}>
+      <line x1=${P} y1=${ys(g)} x2=${W - P} y2=${ys(g)} stroke="var(--line)" stroke-width="1" />
+      <text x=${4} y=${ys(g) + 3} fill="var(--muted)" font-size="9">${g}</text></g>`)}
+    <path d=${path} fill="none" stroke="var(--accent)" stroke-width="2" />
+    ${points.map((p, i) => html`<circle key=${i} cx=${xs(i)} cy=${ys(p.score)} r="3.5" fill=${SEV_COLOR[p.score >= 80 ? 'critical' : p.score >= 60 ? 'high' : p.score >= 35 ? 'medium' : p.score >= 15 ? 'low' : 'info']}>
+      <title>${p.asset} · ${p.score}/100 · ${p.findings}건 · ${fmt(p.ts)}</title></circle>`)}
+  </svg>`;
+}
+
+// ───────────────────────── 자산 + 소유권 게이트 ─────────────────────────
+function Assets({ user, toast }) {
+  const [assets, setAssets] = useState([]);
+  const [form, setForm] = useState({ type: 'domain', value: '', label: '', businessCriticality: 'medium' });
+  const [sel, setSel] = useState(null);
+  const [challenge, setChallenge] = useState(null);
+  const canWrite = ['admin', 'scanner'].includes(user.role);
+  const load = () => api('GET', '/api/assets').then((r) => setAssets(r.json || []));
+  useEffect(() => { load(); }, []);
+
+  const create = async () => {
+    const r = await api('POST', '/api/assets', form);
+    if (r.ok) { toast('자산 등록 완료'); setForm({ ...form, value: '', label: '' }); load(); }
+    else toast(r.json?.message || '실패', true);
+  };
+  const startChallenge = async (asset, method) => {
+    const r = await api('POST', `/api/assets/${asset.id}/ownership/challenge`, { method });
+    if (r.ok) { setSel(asset.id); setChallenge({ ...r.json, method }); toast('검증 토큰 발급'); load(); }
+  };
+  const verify = async (asset, extra = {}) => {
+    const r = await api('POST', `/api/assets/${asset.id}/ownership/verify`, extra);
+    if (r.ok) { toast(r.json.proof.status === 'verified' ? '✅ 소유권 검증 성공' : '검증 실패: ' + r.json.proof.detail, r.json.proof.status !== 'verified'); load(); setChallenge(null); }
+  };
+
+  return html`
+    ${canWrite && html`<div class="panel">
+      <h3>자산 등록</h3>
+      <div class="row">
+        <div><label>유형</label><select value=${form.type} onChange=${(e) => setForm({ ...form, type: e.target.value })}>
+          <option value="domain">도메인</option><option value="host">호스트</option><option value="web">웹</option></select></div>
+        <div style=${{ flex: 2 }}><label>값 (도메인/IP)</label><input value=${form.value} placeholder="example.com" onChange=${(e) => setForm({ ...form, value: e.target.value })} /></div>
+        <div><label>라벨</label><input value=${form.label} onChange=${(e) => setForm({ ...form, label: e.target.value })} /></div>
+        <div><label>중요도</label><select value=${form.businessCriticality} onChange=${(e) => setForm({ ...form, businessCriticality: e.target.value })}>
+          <option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="critical">critical</option></select></div>
+        <div style=${{ flex: 0 }}><label>&nbsp;</label><button class="primary" onClick=${create}>등록</button></div>
+      </div>
+    </div>`}
+    <div class="panel">
+      <h3>자산 목록 · 소유권 검증 게이트</h3>
+      <table><thead><tr><th>자산</th><th>유형</th><th>중요도</th><th>소유권</th><th>검증 방식</th><th>액션</th></tr></thead>
+        <tbody>${assets.map((a) => html`<tr key=${a.id}>
+          <td><b>${a.value}</b><div class="muted">${a.label || ''}</div></td>
+          <td><span class="pill">${a.type}</span></td>
+          <td>${a.businessCriticality}</td>
+          <td>${a.ownership
+            ? html`<span class=${a.ownership.status === 'verified' ? 'ok' : 'no'}>${a.ownership.status}</span>`
+            : html`<span class="muted">unverified</span>`}</td>
+          <td class="muted">${a.ownership?.method || '-'}</td>
+          <td>${canWrite && html`<div style=${{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            ${a.ownership?.status === 'verified'
+              ? html`<span class="ok">검증완료</span>`
+              : html`
+                <button onClick=${() => startChallenge(a, 'dns-txt')}>DNS</button>
+                <button onClick=${() => startChallenge(a, 'file-upload')}>파일</button>
+                <button onClick=${() => startChallenge(a, 'contract-esign')}>전자서명</button>
+                ${a.ownership && a.ownership.method !== 'contract-esign' && html`<button class="primary" onClick=${() => verify(a)}>검증확인</button>`}
+                ${a.ownership && a.ownership.method === 'contract-esign' && html`<button class="primary" onClick=${() => verify(a, { contractSignatureHash: 'sig_' + Math.random().toString(16).slice(2), businessRegistryVerified: true })}>서명검증</button>`}
+              `}
+          </div>`}</td></tr>`)}
+        </tbody></table>
+      ${challenge && html`<div class="panel" style=${{ marginTop: 14, background: 'var(--panel2)' }}>
+        <h3>검증 안내 (${challenge.proof.method})</h3>
+        <pre class="evidence">${challenge.instructions}</pre>
+        <div class="muted">위 절차 수행 후 목록의 '검증확인' 버튼을 누르세요. (전자서명은 데모상 즉시 검증)</div>
+      </div>`}
+    </div>`;
+}
+
+// ───────────────────────── 동의·범위 ─────────────────────────
+function Consents({ user, toast }) {
+  const [consents, setConsents] = useState([]);
+  const [assets, setAssets] = useState([]);
+  const nowLocal = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const plus = (h) => new Date(Date.now() + h * 3600000 - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const [form, setForm] = useState({ assetId: '', allowedTargets: '', allowedPorts: '80,443', maxIntensity: 'standard', windowStart: nowLocal(), windowEnd: plus(24), aggressiveApprovedBy: '' });
+  const canWrite = ['admin', 'scanner'].includes(user.role);
+  const load = () => { api('GET', '/api/consents').then((r) => setConsents(r.json || [])); api('GET', '/api/assets').then((r) => setAssets(r.json || [])); };
+  useEffect(() => { load(); }, []);
+
+  const create = async () => {
+    const body = {
+      assetId: form.assetId,
+      allowedTargets: form.allowedTargets.split(',').map((s) => s.trim()).filter(Boolean),
+      allowedPorts: form.allowedPorts.split(',').map((s) => parseInt(s.trim(), 10)).filter(Boolean),
+      maxIntensity: form.maxIntensity,
+      windowStart: new Date(form.windowStart).toISOString(),
+      windowEnd: new Date(form.windowEnd).toISOString(),
+      aggressiveApprovedBy: form.aggressiveApprovedBy || undefined,
+    };
+    const r = await api('POST', '/api/consents', body);
+    if (r.ok) { toast('동의·범위 등록 완료'); load(); } else toast(r.json?.message || '실패', true);
+  };
+  const revoke = async (c) => { const r = await api('POST', `/api/consents/${c.id}/revoke`); if (r.ok) { toast('동의 철회(kill-switch) 실행'); load(); } };
+  const assetName = (id) => assets.find((a) => a.id === id)?.value || id;
+
+  return html`
+    ${canWrite && html`<div class="panel">
+      <h3>동의·범위 등록 (점검 윈도우)</h3>
+      <div class="row">
+        <div><label>대상 자산</label><select value=${form.assetId} onChange=${(e) => setForm({ ...form, assetId: e.target.value })}>
+          <option value="">선택…</option>${assets.map((a) => html`<option key=${a.id} value=${a.id}>${a.value}</option>`)}</select></div>
+        <div><label>최대 강도</label><select value=${form.maxIntensity} onChange=${(e) => setForm({ ...form, maxIntensity: e.target.value })}>
+          <option value="passive">passive</option><option value="standard">standard</option><option value="aggressive">aggressive</option></select></div>
+      </div>
+      <div class="row">
+        <div style=${{ flex: 2 }}><label>허용 대상 (egress allowlist, 콤마)</label><input value=${form.allowedTargets} placeholder="example.com, 127.0.0.1" onChange=${(e) => setForm({ ...form, allowedTargets: e.target.value })} /></div>
+        <div><label>허용 포트 (콤마)</label><input value=${form.allowedPorts} onChange=${(e) => setForm({ ...form, allowedPorts: e.target.value })} /></div>
+      </div>
+      <div class="row">
+        <div><label>시작</label><input type="datetime-local" value=${form.windowStart} onChange=${(e) => setForm({ ...form, windowStart: e.target.value })} /></div>
+        <div><label>종료</label><input type="datetime-local" value=${form.windowEnd} onChange=${(e) => setForm({ ...form, windowEnd: e.target.value })} /></div>
+        <div><label>Aggressive 승인자(4-eyes)</label><input value=${form.aggressiveApprovedBy} placeholder="선택 (aggressive 시 필수)" onChange=${(e) => setForm({ ...form, aggressiveApprovedBy: e.target.value })} /></div>
+        <div style=${{ flex: 0 }}><label>&nbsp;</label><button class="primary" onClick=${create} disabled=${!form.assetId}>등록</button></div>
+      </div>
+    </div>`}
+    <div class="panel">
+      <h3>동의 목록</h3>
+      <table><thead><tr><th>자산</th><th>최대강도</th><th>허용대상</th><th>포트</th><th>윈도우</th><th>상태</th><th></th></tr></thead>
+        <tbody>${consents.map((c) => html`<tr key=${c.id}>
+          <td>${assetName(c.assetId)}</td><td><span class="pill">${c.scope.maxIntensity}</span></td>
+          <td class="mono">${c.scope.allowedTargets.join(', ') || '-'}</td>
+          <td class="mono">${c.scope.allowedPorts.join(',') || '표준'}</td>
+          <td class="muted">${fmt(c.windowStart)}<br/>~ ${fmt(c.windowEnd)}</td>
+          <td><span class=${c.status === 'active' ? 'ok' : 'no'}>${c.status}</span></td>
+          <td>${canWrite && c.status === 'active' && html`<button class="danger" onClick=${() => revoke(c)}>철회</button>`}</td></tr>`)}
+          ${!consents.length && html`<tr><td colSpan="7" class="muted">동의 없음</td></tr>`}
+        </tbody></table>
+    </div>`;
+}
+
+// ───────────────────────── 점검 작업 ─────────────────────────
+function Scans({ user, toast, onOpenReport }) {
+  const [jobs, setJobs] = useState([]);
+  const [assets, setAssets] = useState([]);
+  const [form, setForm] = useState({ assetId: '', modules: ['asm', 'config', 'cve'], intensity: 'standard' });
+  const canScan = ['admin', 'scanner'].includes(user.role);
+  const load = () => { api('GET', '/api/scans').then((r) => setJobs(r.json || [])); api('GET', '/api/assets').then((r) => setAssets(r.json || [])); };
+  useEffect(() => { load(); const t = setInterval(load, 2500); return () => clearInterval(t); }, []);
+
+  const toggleMod = (m) => setForm((f) => ({ ...f, modules: f.modules.includes(m) ? f.modules.filter((x) => x !== m) : [...f.modules, m] }));
+  const run = async () => {
+    const r = await api('POST', '/api/scans', form);
+    if (r.status === 202) toast('게이트 통과 → 점검 큐 진입');
+    else if (r.status === 422) toast('🚫 게이트 차단: ' + (r.json.gateDecision?.reason || ''), true);
+    else toast(r.json?.message || '실패', true);
+    load();
+  };
+  const assetName = (id) => assets.find((a) => a.id === id)?.value || id;
+
+  return html`
+    ${canScan && html`<div class="panel">
+      <h3>점검 실행</h3>
+      <div class="row">
+        <div><label>대상 자산</label><select value=${form.assetId} onChange=${(e) => setForm({ ...form, assetId: e.target.value })}>
+          <option value="">선택…</option>${assets.map((a) => html`<option key=${a.id} value=${a.id}>${a.value} ${a.ownership?.status === 'verified' ? '✓' : '(미검증)'}</option>`)}</select></div>
+        <div><label>강도 프로파일</label><select value=${form.intensity} onChange=${(e) => setForm({ ...form, intensity: e.target.value })}>
+          <option value="passive">passive (소유권만)</option><option value="standard">standard (소유권+동의)</option><option value="aggressive">aggressive (+추가승인)</option></select></div>
+        <div style=${{ flex: 2 }}><label>점검 모듈</label>
+          <div style=${{ display: 'flex', gap: 6 }}>
+            ${['asm', 'config', 'cve', 'dast'].map((m) => html`<button key=${m} class=${form.modules.includes(m) ? 'primary' : ''} onClick=${() => toggleMod(m)}>${m.toUpperCase()}</button>`)}
+          </div></div>
+        <div style=${{ flex: 0 }}><label>&nbsp;</label><button class="primary" onClick=${run} disabled=${!form.assetId || !form.modules.length}>점검 시작</button></div>
+      </div>
+      <div class="muted" style=${{ marginTop: 8 }}>※ 검증되지 않은 자산·범위 밖 대상·윈도우 밖 요청은 게이트가 차단합니다.</div>
+    </div>`}
+    <div class="panel">
+      <h3>점검 작업 목록</h3>
+      <table><thead><tr><th>작업</th><th>자산</th><th>모듈</th><th>강도</th><th>상태</th><th>발견</th><th>사유/시각</th><th></th></tr></thead>
+        <tbody>${jobs.map((j) => html`<tr key=${j.id}>
+          <td class="mono">${j.id.slice(0, 12)}</td><td>${assetName(j.assetId)}</td>
+          <td class="muted">${j.modules.join(',')}</td><td><span class="pill">${j.intensity}</span></td>
+          <td><${Status} s=${j.status} /></td><td>${j.findings.length}</td>
+          <td class="muted" style=${{ maxWidth: 240 }}>${j.status === 'rejected' || j.status === 'aborted' ? (j.gateDecision?.reason || j.error) : fmt(j.finishedAt || j.queuedAt)}</td>
+          <td>${j.status === 'completed' && html`<button onClick=${() => onOpenReport(j.id)}>리포트</button>`}</td></tr>`)}
+          ${!jobs.length && html`<tr><td colSpan="8" class="muted">작업 없음</td></tr>`}
+        </tbody></table>
+    </div>`;
+}
+
+// ───────────────────────── 리포트 ─────────────────────────
+function Report({ jobId, onBack }) {
+  const [r, setR] = useState(null);
+  useEffect(() => { api('GET', `/api/scans/${jobId}/report`).then((x) => setR(x.json)); }, [jobId]);
+  if (!r) return html`<div class="muted">리포트 로딩 중…</div>`;
+  const e = r.executive;
+  return html`
+    <div style=${{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+      <button onClick=${onBack}>← 목록</button>
+      <button class="primary" onClick=${() => openAuthedDoc(`/api/scans/${jobId}/report.html`, 'text/html')}>🖨 PDF 리포트</button>
+      <${FixPromptButton} findings=${r.technical} target=${r.asset.value} />
+      <button onClick=${() => openAuthedDoc(`/api/scans/${jobId}/report.md`, 'text/markdown')}>리포트 마크다운(.md)</button>
+    </div>
+    <div class="panel" style=${{ marginTop: 14 }}>
+      <h3>경영진 요약 — ${r.asset.value}</h3>
+      <div class="grid cards">
+        <div class="card"><div class="k">종합 위험도</div><div class="v">${e.overallScore}<span class="muted">/100</span></div>
+          <div><${Sev} s=${e.band} /></div></div>
+        <div class="card"><div class="k">발견 항목</div><div class="v">${r.technical.length}</div></div>
+        <div class="card" style=${{ gridColumn: 'span 2' }}><div class="k">핵심 메시지</div><div style=${{ marginTop: 8 }}>${e.headline}</div>
+          ${r.delta && html`<div class="muted" style=${{ marginTop: 8 }}>직전 대비: 해소 ${r.delta.resolved} · 신규 ${r.delta.introduced} · 점수변화 ${r.delta.scoreChange >= 0 ? '+' : ''}${r.delta.scoreChange}</div>`}</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>점검 방법론 및 범위</h3>
+      <ul style=${{ margin: 0, paddingLeft: 18, lineHeight: 1.9 }}>
+        ${(r.methodology || []).map((m, i) => html`<li key=${i} class="muted">${m}</li>`)}
+      </ul>
+      ${r.coverage?.length && html`<div class="muted" style=${{ marginTop: 8, fontSize: 12 }}>범위: ${r.coverage.join(' · ')}</div>`}
+    </div>
+    ${r.categories && (Object.keys(r.categories.owasp).length > 0) && html`<div class="panel">
+      <h3>표준 커버리지 (OWASP Top 10 · CWE)</h3>
+      <div style=${{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        ${Object.entries(r.categories.owasp).map(([k, n]) => html`<span key=${k} class="pill">${k} · ${n}건</span>`)}
+      </div>
+      <div style=${{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+        ${Object.entries(r.categories.cwe).map(([k, n]) => html`<span key=${k} class="pill">${k} (${n})</span>`)}
+      </div>
+    </div>`}
+    ${r.remediationRoadmap?.length && html`<div class="panel">
+      <h3>조치 로드맵 (우선순위 · 기한)</h3>
+      <table><thead><tr><th>우선순위</th><th>기한</th><th>항목 수</th><th>대표 항목</th></tr></thead><tbody>
+        ${r.remediationRoadmap.map((t, i) => html`<tr key=${i}>
+          <td><b>${t.priority}</b></td><td class="muted">${t.window}</td><td>${t.items.length}</td>
+          <td class="muted">${t.items.slice(0, 2).map((it) => it.title).join(' / ')}${t.items.length > 2 ? ' …' : ''}</td></tr>`)}
+      </tbody></table>
+    </div>`}
+    <div class="panel">
+      <h3>컴플라이언스 매핑</h3>
+      <table><thead><tr><th>프레임워크</th><th>관련 통제</th></tr></thead><tbody>
+        ${Object.entries(r.compliance).map(([fw, v]) => html`<tr key=${fw}><td><b>${fw}</b></td><td class="muted">${v.controls.join(', ')}</td></tr>`)}
+        ${!Object.keys(r.compliance).length && html`<tr><td colSpan="2" class="muted">매핑 없음</td></tr>`}
+      </tbody></table>
+    </div>
+    <div class="panel">
+      <h3>기술 상세 (위험 우선순위 순)</h3>
+      ${r.technical.map((f) => html`<div key=${f.id} style=${{ borderBottom: '1px solid var(--line)', padding: '12px 0' }}>
+        <div style=${{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <${Sev} s=${f.severity} /><b>${f.title}</b>
+          <span class="pill">위험 ${f.riskScore}</span>
+          ${f.owasp && html`<span class="pill">${f.owasp.split(' ')[0]}</span>`}
+          ${f.cwe && html`<span class="pill">${f.cwe}</span>`}
+          ${f.cve && html`<span class="pill">${f.cve}</span>`}
+          ${f.kev && html`<span class="badge sev-critical">KEV</span>`}
+          ${typeof f.epss === 'number' && html`<span class="pill">EPSS ${(f.epss * 100).toFixed(0)}%</span>`}
+        </div>
+        <div class="muted" style=${{ margin: '6px 0' }}>${f.description}</div>
+        <div class="mono muted">대상: ${f.target}</div>
+        ${f.evidence && html`<pre class="evidence">${f.evidence}</pre>`}
+        ${f.remediation && html`<div style=${{ marginTop: 4 }}>🔧 ${f.remediation}</div>`}
+        ${f.compliance?.length && html`<div class="muted" style=${{ marginTop: 4, fontSize: 11 }}>${f.compliance.map((m) => `${m.framework} ${m.control}`).join(' · ')}</div>`}
+      </div>`)}
+      ${!r.technical.length && html`<div class="muted">발견 항목 없음</div>`}
+    </div>`;
+}
+
+// ───────────────────────── 감사로그 ─────────────────────────
+function Audit() {
+  const [events, setEvents] = useState([]);
+  const [chain, setChain] = useState(null);
+  useEffect(() => { api('GET', '/api/audit?limit=300').then((r) => setEvents(r.json || [])); api('GET', '/api/audit/verify').then((r) => setChain(r.json)); }, []);
+  return html`
+    <div class="panel">
+      <h3>감사로그 무결성 (해시 체인)</h3>
+      ${chain && html`<div>레코드 ${chain.count}건 · 체인 검증: <span class=${chain.valid ? 'ok' : 'no'}>${chain.valid ? '무결성 정상 (변조 없음)' : '⚠ 변조 탐지 @ ' + chain.brokenAt}</span></div>`}
+    </div>
+    <div class="panel">
+      <h3>감사 추적 (append-only)</h3>
+      <table><thead><tr><th>시각</th><th>행위자</th><th>액션</th><th>대상</th><th>결과</th><th>사유</th></tr></thead>
+        <tbody>${events.map((ev) => html`<tr key=${ev.id}>
+          <td class="muted mono">${fmt(ev.ts)}</td><td>${ev.actor || '-'}</td>
+          <td class="mono">${ev.action}</td><td class="mono">${ev.target || '-'}</td>
+          <td><span class=${ev.outcome === 'deny' || ev.outcome === 'error' ? 'no' : 'ok'}>${ev.outcome}</span></td>
+          <td class="muted" style=${{ maxWidth: 320 }}>${ev.reason || ''}</td></tr>`)}
+        </tbody></table>
+    </div>`;
+}
+
+// ───────────────────────── 셸 / 라우팅 ─────────────────────────
+// 발견 유형별 5단 설명: [무엇이 노출] → [왜 위험] → [공격자] → [비즈니스 피해] → [조치]
+function explainFinding(f) {
+  const t = (f.title || '').toLowerCase();
+  const has = (...k) => k.some((x) => t.includes(x));
+  const tgt = f.target || '대상';
+  const pathOnly = (tgt.match(/\/[^\s]*/) || [tgt])[0];
+
+  let e = {
+    exposed: f.description || '보안 취약점 또는 설정 오류가 확인되었습니다.',
+    why: '공격자가 추가 공격의 발판으로 삼을 수 있는 약점입니다.',
+    attacker: '정찰·침투·권한 상승의 출발점으로 악용될 수 있습니다.',
+    business: '정보 유출·서비스 영향·대외 신뢰도 하락으로 이어질 수 있습니다.',
+    action: f.remediation || '해당 항목을 점검·차단하고 재검증하십시오.',
+  };
+
+  if (f.cve || f.module === 'cve') {
+    e = {
+      exposed: `${tgt} 구성요소가 알려진 취약점(${f.cve || 'CVE'})에 영향을 받는 구버전입니다.`,
+      why: '인터넷에 익스플로잇 코드가 공개되어 있을 수 있어, 별도 정찰 없이도 자동화 도구로 즉시 공격당할 수 있습니다.',
+      attacker: '원격 코드 실행·인증 우회·데이터 탈취 등 취약점 유형에 따른 직접 침해가 가능합니다.',
+      business: f.kev
+        ? '실제 악용이 확인된(KEV) 취약점으로, 침해 시 대규모 정보 유출·서비스 중단·규제 제재로 직결될 수 있습니다.'
+        : '침해 시 고객정보 유출·서비스 중단·복구 비용이 발생할 수 있습니다.',
+      action: f.remediation || '취약 구성요소를 패치 버전으로 즉시 업그레이드하십시오.',
+    };
+  } else if (has('.git', '.env', 'server-status', '민감 경로', '정보 노출')) {
+    e = {
+      exposed: `외부에서 ${pathOnly} 접근 가능성이 확인되었습니다.`,
+      why: '.env·.git·server-status 등에는 DB 계정, API Key, 토큰, 클라우드 접근키, 소스코드 같은 핵심 비밀정보가 담길 수 있습니다.',
+      attacker: '유출 시 내부 시스템 접속, 데이터 조회, 관리자 권한 탈취, 서비스 변조로 이어질 수 있습니다.',
+      business: '고객정보 유출, 서비스 중단, 대외 신뢰도 하락, 규제 대응 비용이 발생할 수 있습니다.',
+      action: '즉시 외부 접근 차단, 노출 파일 제거, 노출된 비밀키 전면 교체, 접근 로그 확인이 필요합니다.',
+    };
+  } else if (has('admin', '관리', 'wp-admin', 'manager', 'phpmyadmin')) {
+    e = {
+      exposed: `관리자/운영 인터페이스(${pathOnly})가 외부에서 접근 가능합니다.`,
+      why: '관리 콘솔은 기본 자격증명·무차별 대입(brute force)·해당 패널의 알려진 취약점의 표적이 됩니다.',
+      attacker: '관리 권한을 탈취해 계정 조작, 데이터 전체 조회·삭제, 백도어 설치가 가능합니다.',
+      business: '전체 시스템 통제권 상실, 대규모 정보 유출, 서비스 마비로 이어질 수 있습니다.',
+      action: '관리 경로를 IP 허용목록/VPN 뒤로 이동, 기본 경로 변경, 다중인증(MFA) 적용.',
+    };
+  } else if (has('hsts')) {
+    e = {
+      exposed: 'HTTPS 강제(HSTS) 정책이 적용되어 있지 않습니다.',
+      why: '중간자 공격자가 HTTPS 연결을 평문 HTTP로 강등(SSL stripping)시킬 수 있습니다.',
+      attacker: '로그인 세션·비밀번호·쿠키를 평문으로 가로채 계정을 탈취할 수 있습니다.',
+      business: '계정 도용·개인정보 유출에 따른 피해 보상과 신뢰도 하락이 발생합니다.',
+      action: 'Strict-Transport-Security: max-age=31536000; includeSubDomains 적용.',
+    };
+  } else if (has('csp')) {
+    e = {
+      exposed: '콘텐츠 보안 정책(CSP)이 설정되어 있지 않습니다.',
+      why: 'XSS가 발생하면 악성 스크립트 실행을 차단할 마지막 방어선이 없습니다.',
+      attacker: '세션 쿠키 탈취, 피싱 페이지 삽입, 악성코드 배포가 가능합니다.',
+      business: '대량 계정 탈취·악성코드 유포 사고로 번질 수 있습니다.',
+      action: 'Content-Security-Policy로 스크립트/리소스 출처를 제한.',
+    };
+  } else if (has('x-frame', '클릭재킹')) {
+    e = {
+      exposed: '클릭재킹 방지 헤더(X-Frame-Options / CSP frame-ancestors)가 없습니다.',
+      why: '공격자가 사이트를 투명 iframe으로 덧씌워 사용자의 클릭을 가로챌 수 있습니다.',
+      attacker: '사용자가 모르는 사이 송금·권한 변경·동의 같은 민감 동작을 실행시킬 수 있습니다.',
+      business: '부정거래·권한 오남용에 따른 분쟁과 보상 비용이 발생합니다.',
+      action: 'X-Frame-Options: DENY 또는 CSP frame-ancestors 적용.',
+    };
+  } else if (has('x-content-type', 'mime')) {
+    e = {
+      exposed: 'MIME 스니핑 방지(X-Content-Type-Options) 헤더가 없습니다.',
+      why: '브라우저가 파일 타입을 추측해, 업로드 파일이 실행 스크립트로 해석될 수 있습니다.',
+      attacker: '악성 파일을 스크립트로 실행시켜 XSS·악성코드 유포가 가능합니다.',
+      business: '방문자 단말 감염·브랜드 신뢰도 하락으로 이어질 수 있습니다.',
+      action: 'X-Content-Type-Options: nosniff 적용.',
+    };
+  } else if (has('referrer')) {
+    e = {
+      exposed: 'Referrer 정책이 설정되어 있지 않습니다.',
+      why: '페이지의 전체 URL(토큰·내부 경로 포함)이 외부 사이트로 전달될 수 있습니다.',
+      attacker: '세션 토큰·내부 구조 정보를 수집해 후속 공격에 활용합니다.',
+      business: '민감정보 유출 경로가 되어 규제 위반 소지가 있습니다.',
+      action: 'Referrer-Policy: strict-origin-when-cross-origin 적용.',
+    };
+  } else if (has('쿠키', 'cookie', 'secure', 'httponly', 'samesite')) {
+    e = {
+      exposed: '세션 쿠키에 보안 플래그(Secure / HttpOnly / SameSite)가 누락되었습니다.',
+      why: '평문 전송·자바스크립트 접근·교차사이트 전송이 허용됩니다.',
+      attacker: '세션 쿠키를 탈취하거나 CSRF로 사용자 권한을 도용할 수 있습니다.',
+      business: '계정 탈취·부정거래에 따른 보상·신뢰도 하락이 발생합니다.',
+      action: '쿠키에 Secure; HttpOnly; SameSite=Lax|Strict 적용.',
+    };
+  } else if (has('서버 정보', 'server', 'x-powered')) {
+    e = {
+      exposed: '응답 헤더로 서버 제품·버전 정보가 노출됩니다.',
+      why: '공격자가 해당 버전에 맞는 알려진 취약점을 즉시 선별할 수 있습니다.',
+      attacker: '버전 특화 익스플로잇으로 정밀 타격을 시도합니다.',
+      business: '공격 성공률이 높아져 침해 위험이 커집니다.',
+      action: 'Server·X-Powered-By 등 식별 헤더 제거/일반화.',
+    };
+  } else if (has('tls', '인증서', 'https')) {
+    e = {
+      exposed: '전송 구간 암호화(TLS/인증서) 구성에 문제가 확인되었습니다.',
+      why: '만료·약한 구성은 중간자 공격과 보안 경고 무시를 유발합니다.',
+      attacker: '통신을 도청·변조하거나 가짜 사이트로 유도할 수 있습니다.',
+      business: '통신 기밀성 상실·사용자 이탈·신뢰도 하락이 발생합니다.',
+      action: '인증서 갱신 및 자동 갱신(ACME) 구성, 강한 암호 스위트 적용.',
+    };
+  } else if (has('포트', 'port', '서비스')) {
+    e = {
+      exposed: `민감 서비스 포트(${tgt})가 인터넷에 직접 노출되어 있습니다.`,
+      why: 'DB·원격관리·파일공유 서비스는 인증 취약점·무차별 대입의 표적입니다.',
+      attacker: '서비스에 직접 접속해 데이터 탈취·내부 횡적 이동을 시도합니다.',
+      business: '데이터베이스 유출·랜섬웨어 침투의 진입점이 됩니다.',
+      action: '불필요 포트 방화벽 차단, 관리 포트는 VPN/허용목록 뒤로 이동.',
+    };
+  } else if (has('디렉터리', '인덱싱')) {
+    e = {
+      exposed: '디렉터리 자동 목록(인덱싱)이 활성화되어 있습니다.',
+      why: '내부 파일 구조·백업·설정 파일이 그대로 드러납니다.',
+      attacker: '노출된 파일에서 비밀정보·소스를 수집해 공격을 정교화합니다.',
+      business: '정보 유출 및 후속 침해 위험이 커집니다.',
+      action: '웹서버 자동 디렉터리 인덱싱 비활성화.',
+    };
+  } else if (has('반사', 'xss')) {
+    e = {
+      exposed: '입력값이 응답에 그대로 반사되는 지점이 확인되었습니다.',
+      why: '반사형/저장형 XSS로 이어질 수 있는 표면입니다.',
+      attacker: '방문자 브라우저에서 악성 스크립트를 실행해 세션 탈취·피싱을 수행합니다.',
+      business: '대량 계정 탈취·브랜드 피싱 악용 피해가 발생할 수 있습니다.',
+      action: '출력 인코딩·입력 검증 적용, CSP 강화.',
+    };
+  }
+  return e;
+}
+
+// 인증 토큰을 실어 문서를 받아 새 탭(Blob)으로 연다 — Bearer 인증 엔드포인트용
+async function openAuthedDoc(path, type) {
+  const res = await fetch(path, { headers: { authorization: `Bearer ${tokenStore.get()}` } });
+  if (!res.ok) { alert('문서를 불러오지 못했습니다 (' + res.status + ')'); return; }
+  const text = await res.text();
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  window.open(url, '_blank');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+// 텍스트를 .md 파일로 다운로드
+function downloadMd(filename, text) {
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// 점검 결과 → AI 코딩 어시스턴트에 그대로 붙여넣는 "수정 명령서" 마크다운 생성
+function buildFixPrompt(findings, target) {
+  const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  const sorted = [...findings].sort((a, b) => (order[a.severity] - order[b.severity]) || ((b.riskScore || 0) - (a.riskScore || 0)));
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  let max = 0, sum = 0;
+  for (const f of findings) { counts[f.severity]++; max = Math.max(max, f.riskScore || 0); sum += f.riskScore || 0; }
+  const score = findings.length ? Math.round(max * 0.7 + Math.min(100, Math.log2(sum + 1) * 8) * 0.3) : 0;
+
+  const L = [];
+  L.push('# 🤖 보안 취약점 수정 명령서 (AI 프롬프트)', '');
+  L.push('> 이 문서를 그대로 AI 코딩 어시스턴트(Cursor · Copilot 등)에 붙여넣으세요.');
+  L.push('> AI가 아래 취약점을 우선순위에 따라 안전하게 수정합니다.', '');
+  L.push('## 역할');
+  L.push('당신은 시니어 애플리케이션 보안 엔지니어입니다. SENTINEL-ASM 보안 점검에서 발견된 아래 취약점을 코드/설정 수정으로 해결하세요.', '');
+  L.push('## 작업 지침');
+  L.push('1. **치명적 → 심각 → 주의** 순으로 처리하고, 각 항목마다 무엇을 왜 바꾸는지 한 줄로 설명하세요.');
+  L.push('2. 기존 기능을 깨뜨리지 않도록 최소 변경으로 수정하고, 변경한 파일 경로와 diff(또는 전체 코드)를 제시하세요.');
+  L.push('3. 실제 사용 중인 프레임워크/서버(nginx · Express · Spring · Apache 등)에 맞는 구체적 설정·코드로 작성하세요.');
+  L.push('4. 비밀정보(.env · 키 · 토큰)가 노출된 항목은 **노출 차단 + 해당 키의 폐기·재발급**까지 안내하세요.');
+  L.push('5. 의존성 취약점(CVE)은 안전한 최소 상향 버전을 명시하고 호환성 주의사항을 덧붙이세요.');
+  L.push('6. 모든 수정 후 각 항목의 해결 여부를 확인하는 **검증 방법**을 제시하세요.', '');
+  L.push('## 점검 개요');
+  L.push(`- 대상: ${target || '-'}`);
+  L.push(`- 종합 위험도: ${score}/100`);
+  L.push(`- 발견: 총 ${findings.length}건 (치명적 ${counts.critical} · 심각 ${counts.high} · 주의 ${counts.medium} · 경미 ${counts.low} · 정보 ${counts.info})`, '');
+  L.push('## 수정 대상 취약점');
+  sorted.forEach((f, i) => {
+    const e = explainFinding(f);
+    L.push('', `### ${i + 1}. [${SEV_KO[f.severity] || f.severity}] ${f.title}`);
+    L.push(`- **위치/대상**: \`${f.target}\``);
+    if (f.owasp || f.cwe) L.push(`- **표준 분류**: ${[f.owasp, f.cwe].filter(Boolean).join(' · ')}`);
+    if (f.cve) L.push(`- **CVE**: ${f.cve}${f.kev ? ' (실제 악용 확인 · KEV)' : ''}${typeof f.epss === 'number' ? ` · EPSS ${(f.epss * 100).toFixed(0)}%` : ''}${f.cvss != null ? ` · CVSS ${f.cvss}` : ''}`);
+    L.push(`- **무엇이 노출되었는가**: ${e.exposed}`);
+    L.push(`- **왜 위험한가**: ${e.why}`);
+    L.push(`- **공격 시나리오**: ${e.attacker}`);
+    L.push(`- **비즈니스 피해**: ${e.business}`);
+    L.push(`- **요구 수정 (지시)**: ${e.action}`);
+    if (f.references?.length) L.push(`- **참고 표준**: ${f.references.join(' , ')}`);
+    L.push('- **완료 기준**: 위 수정을 적용해 재점검 시 본 항목이 더 이상 탐지되지 않아야 합니다.');
+  });
+  L.push('', '## 완료 후 보고');
+  L.push('- 항목별로 (1) 적용한 수정 (2) 변경 파일 (3) 검증 방법을 표로 정리하세요.');
+  L.push('- 수정으로 영향받을 수 있는 기능과 회귀 테스트 포인트를 알려주세요.', '');
+  L.push('---');
+  L.push('_SENTINEL-ASM 자동 생성 · 권한이 검증된 본인 자산에 한해 수정·점검하세요._');
+  return L.join('\n');
+}
+
+// "AI 수정 명령서(.md)" 다운로드 버튼
+function FixPromptButton({ findings, target }) {
+  if (!findings?.length) return null;
+  const fn = `sentinel-fix-${String(target || 'scan').replace(/[^\w.-]/g, '_').slice(0, 40)}.md`;
+  return html`<button class="primary" onClick=${() => downloadMd(fn, buildFixPrompt(findings, target))} title="AI에게 그대로 붙여넣어 코드를 수정시키는 명령서">🤖 AI 수정 명령서 (.md)</button>`;
+}
+
+// ───────────────────────── 발견사항 목록 (공용) ─────────────────────────
+// 구조: 제목/등급 → [피해 시나리오](점수보다 먼저) → 위험 지표 → 조치. 호버 시 5단 상세.
+function FindingList({ findings }) {
+  if (!findings?.length) return html`<div class="muted">발견된 취약점이 없습니다. ✅</div>`;
+  return html`<div>${findings.map((f) => {
+    const e = explainFinding(f);
+    const color = SEV_COLOR[f.severity] || '#dc2626';
+    return html`
+    <div key=${f.id} class="finding">
+      <div style=${{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <${Sev} s=${f.severity} /><b>${f.title}</b>
+        ${f.cve && html`<span class="pill">${f.cve}</span>`}
+        <span class="hint">ⓘ 마우스를 올리면 상세 분석</span>
+      </div>
+      <div class="muted" style=${{ margin: '5px 0' }}>${e.exposed}</div>
+
+      <div class="scenario" style=${{ borderLeftColor: color }}>
+        <div class="scenario-h" style=${{ color }}>🎯 이대로 두면 — 피해 시나리오</div>
+        <div><b>공격자</b> ${e.attacker}</div>
+        <div style=${{ marginTop: 3 }}><b>비즈니스</b> ${e.business}</div>
+      </div>
+
+      <div class="metrics">
+        <span class="pill">우선순위 위험 ${f.riskScore}/100</span>
+        ${f.owasp && html`<span class="pill">${f.owasp.split(' ')[0]}</span>`}
+        ${f.cwe && html`<span class="pill">${f.cwe}</span>`}
+        ${f.cvss != null && html`<span class="pill">CVSS ${f.cvss}</span>`}
+        ${typeof f.epss === 'number' && html`<span class="pill">EPSS ${(f.epss * 100).toFixed(0)}%</span>`}
+        ${f.kev && html`<span class="badge sev-critical">KEV · 실제 악용중</span>`}
+        ${f.confidence && html`<span class="pill">신뢰도 ${f.confidence}</span>`}
+        <span class="pill mono">${f.target}</span>
+      </div>
+
+      <div class="action">🔧 <b>조치</b> ${e.action}</div>
+
+      <div class="why-pop">
+        <div class="arrow"></div>
+        <h5>${f.title}</h5>
+        <div class="sec"><div class="lbl">무엇이 노출되었는가</div>${e.exposed}</div>
+        <div class="sec"><div class="lbl">왜 위험한가</div>${e.why}</div>
+        <div class="sec"><div class="lbl">공격자가 무엇을 할 수 있는가</div>${e.attacker}</div>
+        <div class="sec"><div class="lbl">비즈니스 피해</div>${e.business}</div>
+        ${(f.cvss != null || f.epss != null || f.kev) && html`<div class="sec"><div class="lbl">위험 지표</div>
+          ${f.cvss != null && html`<span class="metric">CVSS ${f.cvss} (0–10)</span>`}
+          ${f.epss != null && html`<span class="metric">EPSS ${(f.epss * 100).toFixed(0)}% · 30일 내 악용 확률</span>`}
+          ${f.kev && html`<span class="metric">KEV · 실제 악용 확인됨</span>`}
+        </div>`}
+        ${(f.owasp || f.cwe) && html`<div class="sec"><div class="lbl">표준 분류</div>
+          ${f.owasp && html`<span class="metric">${f.owasp}</span>`}
+          ${f.cwe && html`<span class="metric">${f.cwe}</span>`}
+          ${f.confidence && html`<span class="metric">신뢰도 ${f.confidence}</span>`}
+        </div>`}
+        <div class="sec"><div class="lbl">조치</div>${e.action}</div>
+        ${f.references?.length && html`<div class="sec"><div class="lbl">참고 표준</div>${f.references.map((u, i) => html`<div key=${i} style=${{ fontSize: 11, color: '#8fa3c8', wordBreak: 'break-all' }}>${u}</div>`)}</div>`}
+      </div>
+    </div>`;
+  })}</div>`;
+}
+
+function aggScore(findings) {
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  let max = 0, sum = 0;
+  for (const f of findings) { counts[f.severity]++; max = Math.max(max, f.riskScore || 0); sum += f.riskScore || 0; }
+  const score = findings.length ? Math.round(max * 0.7 + Math.min(100, Math.log2(sum + 1) * 8) * 0.3) : 0;
+  const band = score >= 80 ? 'critical' : score >= 60 ? 'high' : score >= 35 ? 'medium' : score >= 15 ? 'low' : 'info';
+  return { score, band, counts };
+}
+
+function ScoreBadge({ findings }) {
+  const { score, band, counts } = aggScore(findings);
+  return html`<div style=${{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+    <span class="v" style=${{ fontSize: 22, fontWeight: 700 }}>${score}<span class="muted" style=${{ fontSize: 13 }}>/100</span></span>
+    <${Sev} s=${band} />
+    ${SEV_ORDER.map((s) => html`<span key=${s} class=${`badge sev-${s}`}>${counts[s]} ${s[0].toUpperCase()}</span>`)}
+  </div>`;
+}
+
+// 발견사항 패널 — 심각도 필터 칩 + 검색 + 정렬 (UX)
+function FindingsPanel({ findings }) {
+  const [active, setActive] = useState(new Set());      // 빈 set = 전체
+  const [q, setQ] = useState('');
+  const [sort, setSort] = useState('risk');
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const f of findings) counts[f.severity]++;
+  const toggle = (s) => setActive((prev) => {
+    const n = new Set(prev); n.has(s) ? n.delete(s) : n.add(s); return n;
+  });
+  let list = findings.filter((f) => (active.size === 0 || active.has(f.severity)));
+  if (q.trim()) {
+    const k = q.trim().toLowerCase();
+    list = list.filter((f) => `${f.title} ${f.target} ${f.cve || ''} ${f.cwe || ''} ${f.owasp || ''}`.toLowerCase().includes(k));
+  }
+  const rank = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  list = list.slice().sort((a, b) => sort === 'risk'
+    ? (b.riskScore || 0) - (a.riskScore || 0)
+    : (rank[a.severity] - rank[b.severity]) || ((b.riskScore || 0) - (a.riskScore || 0)));
+
+  return html`
+    <div class="filterbar">
+      <div class="chips">
+        ${SEV_ORDER.map((s) => counts[s] > 0 && html`<button key=${s} class=${`chip sev-${s} ${active.has(s) ? 'on' : ''}`} onClick=${() => toggle(s)}>${SEV_KO[s]} ${counts[s]}</button>`)}
+        ${active.size > 0 && html`<button class="chip" onClick=${() => setActive(new Set())}>전체</button>`}
+      </div>
+      <div class="ftools">
+        <input class="search" placeholder="검색(제목·대상·CVE·CWE)" value=${q} onChange=${(e) => setQ(e.target.value)} />
+        <select value=${sort} onChange=${(e) => setSort(e.target.value)} style=${{ width: 'auto' }}>
+          <option value="risk">위험순</option><option value="severity">심각도순</option>
+        </select>
+      </div>
+    </div>
+    <div class="muted" style=${{ fontSize: 12, margin: '4px 0 8px' }}>${list.length} / ${findings.length}건 표시</div>
+    <${FindingList} findings=${list} />`;
+}
+
+// 진행률 바 — 경과/예상 잔여 시간과 % 표시
+function ProgressBar({ pct, label, eta }) {
+  return html`<div class="progress-wrap">
+    <div class="progress"><i style=${{ width: Math.max(2, Math.min(100, pct)) + '%' }}></i></div>
+    <div class="progress-meta"><span>${label}</span><span><b>${Math.round(pct)}%</b>${eta != null ? ` · 예상 잔여 ~${eta}초` : ''}</span></div>
+  </div>`;
+}
+
+// ───────────────────────── 빠른 점검 (Quick Scan) ─────────────────────────
+function Quick({ user, toast, onOpenReport }) {
+  const [tab, setTab] = useState('domain');
+  const canScan = ['admin', 'scanner'].includes(user.role);
+
+  // 소프트웨어 파일
+  const [filename, setFilename] = useState('');
+  const [content, setContent] = useState('');
+  const [fileJob, setFileJob] = useState(null);
+  const [fileMeta, setFileMeta] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const onFile = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFilename(f.name);
+    setContent(await f.text());
+  };
+  const scanFile = async () => {
+    if (!content.trim()) return toast('파일 내용을 붙여넣거나 업로드하세요.', true);
+    setBusy(true);
+    const r = await api('POST', '/api/quick/sbom', { filename: filename || 'manifest', content });
+    setBusy(false);
+    if (r.status === 201) { setFileJob(r.json.job); setFileMeta({ format: r.json.format, count: r.json.componentCount }); toast(`분석 완료 (${r.json.format})`); }
+    else toast(r.json?.message || '분석 실패', true);
+  };
+
+  // 도메인/URL
+  const [target, setTarget] = useState('');
+  const [attested, setAttested] = useState(false);
+  const [domainJob, setDomainJob] = useState(null);
+  const [bulk, setBulk] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [deep, setDeep] = useState(false);
+  const [prog, setProg] = useState({ pct: 0, label: '', eta: null });
+  const [live, setLive] = useState(null);       // 진행 중 작업(모듈 단계 표시용)
+  const cancelRef = useRef(false);
+  const curJobRef = useRef(null);
+
+  const cancelScan = async () => {
+    cancelRef.current = true;
+    if (curJobRef.current) await api('POST', `/api/scans/${curJobRef.current}/cancel`);
+    setScanning(false); setLive(null);
+    setProg({ pct: 0, label: '', eta: null });
+    toast('점검을 취소했습니다.', false);
+  };
+
+  // 여러 대상(콤마/공백/줄바꿈 구분) 일괄 점검
+  const scanBulk = async (targets) => {
+    setScanning(true); setDomainJob(null); setBulk(null);
+    setProg({ pct: 2, label: `${targets.length}개 대상 ${deep ? '심층' : '간단'} 일괄 점검 시작…`, eta: null });
+    const r = await api('POST', '/api/quick/bulk', { targets, attested, deep });
+    if (r.status !== 202) { toast(r.json?.message || '일괄 점검 실패', true); setScanning(false); return; }
+    const rows = r.json.jobs.map((j) => ({ ...j, status: j.jobId ? 'queued' : 'error' }));
+    setBulk([...rows]);
+    const isDone = (x) => !x.jobId || ['completed', 'failed', 'aborted', 'rejected', 'error'].includes(x.status);
+    const deadline = Date.now() + (deep ? 360 : 120) * 1000;
+    while (Date.now() < deadline && !rows.every(isDone)) {
+      await new Promise((res) => setTimeout(res, 600));
+      for (const row of rows) {
+        if (isDone(row)) continue;
+        const job = (await api('GET', `/api/scans/${row.jobId}`)).json;
+        if (job && job.id) row.status = job.status;
+        if (job?.status === 'completed') { const a = aggScore(job.findings); row.score = a.score; row.band = a.band; row.findings = job.findings.length; }
+      }
+      const done = rows.filter(isDone).length;
+      setProg({ pct: Math.round((done / rows.length) * 100), label: `${done}/${rows.length} 대상 완료`, eta: null });
+      setBulk([...rows]);
+    }
+    setScanning(false);
+    const completed = rows.filter((x) => x.status === 'completed').length;
+    toast(`일괄 점검 종료 — ${completed}/${rows.length} 완료`);
+  };
+
+  const scanDomain = async () => {
+    if (!target.trim()) return toast('도메인 또는 URL 을 입력하세요.', true);
+    if (!attested) return toast('점검 권한 보유 확인에 체크해야 합니다. (법적 필수)', true);
+    const parts = target.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 1) return scanBulk(parts);
+    setScanning(true); setDomainJob(null); setBulk(null); setLive(null);
+    cancelRef.current = false; curJobRef.current = null;
+    const start = Date.now();
+    setProg({ pct: 2, label: `${deep ? '심층' : '간단'} 점검 작업 생성 중…`, eta: null });
+    try {
+      const r = await api('POST', '/api/quick/domain', { target, attested, deep });
+      if (r.status !== 202) { toast('🚫 ' + (r.json.gateDecision?.reason || r.json?.message || '차단됨'), true); return; }
+      let job = r.json;
+      curJobRef.current = job.id;
+      const isTerminal = (s) => ['completed', 'failed', 'aborted', 'rejected'].includes(s);
+      const deadline = Date.now() + (deep ? 300 : 90) * 1000;
+      while (Date.now() < deadline) {
+        if (cancelRef.current) return;        // 사용자 취소
+        await new Promise((res) => setTimeout(res, 600));
+        const jr = await api('GET', `/api/scans/${job.id}`);
+        if (jr.json && jr.json.id) job = jr.json;
+        // 실제 진행률·단계 반영
+        const el = ((Date.now() - start) / 1000).toFixed(0);
+        setLive(job);
+        setProg({
+          pct: typeof job.progress === 'number' ? job.progress : (job.status === 'queued' ? 4 : 8),
+          label: `${job.stage || (job.status === 'queued' ? '큐 대기 중' : '점검 진행 중')} · ${el}초 경과`,
+          eta: null,
+        });
+        if (isTerminal(job.status)) break;
+      }
+      if (cancelRef.current) return;
+      const total = ((Date.now() - start) / 1000).toFixed(0);
+      if (job.status === 'completed') {
+        setProg({ pct: 100, label: `완료 · 총 ${total}초 소요`, eta: 0 });
+        setDomainJob(job); setLive(null);
+        toast(`점검 완료 — ${job.findings.length}건 발견`);
+      } else if (isTerminal(job.status)) {
+        setProg({ pct: 100, label: `상태: ${job.status}`, eta: 0 });
+        setDomainJob(job); setLive(null);
+        toast(`상태: ${job.status}`, true);
+      } else {
+        setProg({ pct: Math.min(96, job.progress || 90), label: `예상보다 오래 걸립니다 · ${total}초 (백그라운드 계속 진행)`, eta: null });
+        setDomainJob(job); setLive(null);
+        toast('점검이 계속 진행 중입니다. 잠시 후 다시 시도하거나 "점검" 목록에서 확인하세요.', false);
+      }
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const onKey = (e) => { if (e.key === 'Enter' && attested && !scanning) scanDomain(); };
+
+  if (!canScan) return html`<div class="panel"><div class="muted">빠른 점검은 admin·scanner 역할만 실행할 수 있습니다.</div></div>`;
+
+  return html`
+    <div class="hero">
+      <div class="wordmark">
+        <div class="logo">🛡</div>
+        <h1>SENTINEL <span class="sub">ASM</span></h1>
+      </div>
+      <div class="tagline">권한이 검증된 대상을 비파괴로 점검하는 엔터프라이즈 보안 플랫폼</div>
+
+      <div class="seg">
+        <button class=${tab === 'domain' ? 'on' : ''} onClick=${() => setTab('domain')}>🔗 도메인 · URL</button>
+        <button class=${tab === 'file' ? 'on' : ''} onClick=${() => setTab('file')}>📦 소프트웨어 파일</button>
+      </div>
+
+      ${tab === 'domain' && html`
+        <div>
+          <div class="searchbox">
+            <span class="icon">🔍</span>
+            <input value=${target} placeholder="도메인/URL 입력 — 여러 개는 콤마·공백으로 구분 (일괄 점검)"
+              onChange=${(e) => setTarget(e.target.value)} onKeyDown=${onKey} autoFocus />
+            <button class="primary" onClick=${scanDomain} disabled=${scanning || !attested}>${scanning ? '점검 중…' : '점검 시작'}</button>
+          </div>
+          <div class="depth-sel">
+            <button class=${!deep ? 'on' : ''} onClick=${() => setDeep(false)}>
+              <div class="d-t">⚡ 간단 점검</div><div class="d-d">핵심·고신호 항목 · 빠름(~30초)</div></button>
+            <button class=${deep ? 'on' : ''} onClick=${() => setDeep(true)}>
+              <div class="d-t">🔬 심층 점검</div><div class="d-d">확장 포트·정밀 항목 전수 · 토시 하나까지(시간 소요)</div></button>
+          </div>
+          <label class="attest">
+            <input type="checkbox" checked=${attested} onChange=${(e) => setAttested(e.target.checked)} />
+            <span>본인이 <b>소유</b>했거나 <b>점검 권한(위탁계약·서면 동의)</b>을 보유한 대상입니다. 무권한 점검은 법으로 금지되며 시스템이 차단·기록합니다. <span class="muted">(설계 §0/§3 · 생략 불가)</span></span>
+          </label>
+          ${(scanning || prog.pct === 100) && html`<div>
+            <${ProgressBar} pct=${prog.pct} label=${prog.label} eta=${scanning ? prog.eta : null} />
+            ${live?.moduleStatus?.length && html`<div class="steps">
+              ${live.moduleStatus.map((m) => html`<span key=${m.module} class=${`step ${m.status}`}>
+                ${m.status === 'done' ? '✓' : m.status === 'running' ? '⏳' : m.status === 'error' ? '⚠' : m.status === 'skipped' ? '–' : '·'} ${m.module.toUpperCase()}${m.status === 'done' ? ` (${m.findings})` : ''}</span>`)}
+            </div>`}
+            ${scanning && html`<div style=${{ textAlign: 'center', marginTop: 10 }}><button class="danger" onClick=${cancelScan}>점검 취소</button></div>`}
+          </div>`}
+        </div>`}
+
+      ${tab === 'file' && html`
+        <div class="filebox">
+          <label class="dropzone" style=${{ display: 'block' }}>
+            <input type="file" style=${{ display: 'none' }} onChange=${onFile} />
+            📄 의존성 파일 선택 ${filename ? html`— <b>${filename}</b>` : ''}<br/>
+            <span style=${{ fontSize: 12 }}>package.json · requirements.txt · pom.xml · go.mod · CycloneDX SBOM</span>
+          </label>
+          <label>또는 내용 붙여넣기</label>
+          <textarea rows="7" class="mono" value=${content} placeholder=${'{\n  "dependencies": {\n    "lodash": "4.17.20",\n    "axios": "0.21.1"\n  }\n}'} onChange=${(e) => setContent(e.target.value)}></textarea>
+          <div style=${{ marginTop: 12, textAlign: 'center' }}><button class="primary" onClick=${scanFile} disabled=${busy}>${busy ? '분석 중…' : '취약점 분석'}</button></div>
+          ${busy && html`<div class="progress-wrap"><div class="progress indet"><i></i></div><div class="progress-meta"><span>구성요소 분석 중…</span><span></span></div></div>`}
+          <div class="muted" style=${{ marginTop: 8, fontSize: 12, textAlign: 'center' }}>원격 대상에 트래픽을 전혀 보내지 않는 정적 분석 — 권한 절차가 필요 없습니다.</div>
+        </div>`}
+
+      ${tab === 'file' && fileJob && html`<div class="panel result-card">
+        <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          <div><b>분석 결과</b> <span class="muted">· ${fileMeta?.format} · 구성요소 ${fileMeta?.count}개 · 취약 ${fileJob.findings.length}건</span></div>
+          <div style=${{ display: 'flex', gap: 8 }}>
+            <${FixPromptButton} findings=${fileJob.findings} target=${filename || 'software'} />
+            <button onClick=${() => onOpenReport(fileJob.id)}>전체 리포트 →</button>
+          </div>
+        </div>
+        <div style=${{ margin: '12px 0' }}><${ScoreBadge} findings=${fileJob.findings} /></div>
+        <${FindingsPanel} findings=${fileJob.findings} />
+      </div>`}
+
+      ${tab === 'domain' && bulk && html`<div class="panel result-card" style=${{ maxWidth: 860 }}>
+        <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+          <div><b>일괄 점검 결과</b> <span class="depth-badge">${deep ? '🔬 심층' : '⚡ 간단'}</span> <span class="muted">· ${bulk.length}개 대상</span></div>
+        </div>
+        <table><thead><tr><th>대상</th><th>상태</th><th>위험도</th><th>발견</th><th></th></tr></thead><tbody>
+          ${bulk.map((row) => html`<tr key=${row.target}>
+            <td><b>${row.target}</b></td>
+            <td><${Status} s=${row.status} /></td>
+            <td>${row.band ? html`<${Sev} s=${row.band} /> <span class="muted">${row.score}/100</span>` : html`<span class="muted">—</span>`}</td>
+            <td>${row.findings != null ? row.findings : '—'}</td>
+            <td>${row.status === 'completed' && html`<button onClick=${() => onOpenReport(row.jobId)}>리포트 →</button>`}
+                ${(row.status === 'rejected' || row.status === 'error') && html`<span class="no" style=${{ fontSize: 11 }}>${row.reason || ''}</span>`}</td>
+          </tr>`)}
+        </tbody></table>
+      </div>`}
+
+      ${tab === 'domain' && domainJob && !bulk && html`<div class="panel result-card">
+        ${domainJob.status === 'completed' ? html`
+          <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <div><b>점검 결과</b> <span class="depth-badge">${domainJob.depth === 'deep' ? '🔬 심층' : '⚡ 간단'}</span> <span class="muted">· ${domainJob.findings.length}건 발견</span></div>
+            <div style=${{ display: 'flex', gap: 8 }}>
+              <button onClick=${scanDomain} disabled=${scanning} title="동일 설정으로 다시 점검(폐루프)">↻ 재점검</button>
+              <${FixPromptButton} findings=${domainJob.findings} target=${target} />
+              <button onClick=${() => onOpenReport(domainJob.id)}>전체 리포트 →</button>
+            </div>
+          </div>
+          <div style=${{ margin: '12px 0' }}><${ScoreBadge} findings=${domainJob.findings} /></div>
+          <${FindingsPanel} findings=${domainJob.findings} />`
+        : html`<div class=${domainJob.status === 'rejected' ? 'no' : 'muted'}>상태: ${domainJob.status} ${domainJob.gateDecision?.reason ? '— ' + domainJob.gateDecision.reason : ''}</div>`}
+      </div>`}
+
+      ${!domainJob && !fileJob && !bulk && html`<div class="coverage">
+        <div class="cov-title">엔터프라이즈 점검 커버리지</div>
+        <div class="cov-grid">
+          ${COVERAGE_CARDS.map((c) => html`<div key=${c.t} class="cov-card">
+            <div class="cov-ic">${c.ic}</div><div class="cov-h">${c.t}</div><div class="cov-d">${c.d}</div>
+          </div>`)}
+        </div>
+        <div class="cov-foot">표준 매핑: OWASP Top 10 · CWE · OWASP ASVS · ISMS-P · ISO/IEC 27001 · PCI-DSS · NIST CSF · 개인정보보호법/GDPR · 전자금융감독규정</div>
+      </div>`}
+    </div>`;
+}
+
+const COVERAGE_CARDS = [
+  { ic: '🌐', t: '공격표면관리 (ASM)', d: '서브도메인 열거 · 오픈 포트/서비스 핑거프린팅 · Shadow IT 식별' },
+  { ic: '📧', t: '이메일·DNS 보안', d: 'SPF · DMARC · DKIM · CAA · MX 스푸핑 방지 자세 점검' },
+  { ic: '🔐', t: '전송계층 (TLS)', d: 'TLS 버전(1.0/1.1 차단) · 인증서 만료/체인 검증' },
+  { ic: '🧱', t: '보안 헤더·구성', d: 'HSTS · CSP · XFO · COOP/COEP/CORP · Permissions-Policy' },
+  { ic: '🔁', t: 'CORS·HTTP 메서드', d: 'CORS 오구성(와일드카드+credentials) · TRACE/PUT 등 위험 메서드' },
+  { ic: '🍪', t: '쿠키·세션', d: 'Secure · HttpOnly · SameSite 플래그 심층 분석' },
+  { ic: '📂', t: '민감 정보 노출', d: '.env · .git · Actuator · 백업/키 파일 (콘텐츠 검증 · 오탐 제거)' },
+  { ic: '📦', t: 'SBOM·CVE', d: 'npm·PyPI·Maven 구성요소 대조 · EPSS/KEV 가중 우선순위' },
+  { ic: '📊', t: '위험·컴플라이언스', d: 'CVSS×중요도×노출 산정 · 8개 표준 자동 증빙 · 조치 로드맵' },
+];
+
+const NAV = [
+  { path: '#/', label: '⚡ 빠른 점검', roles: ['admin', 'scanner'] },
+  { path: '#/dashboard', label: '대시보드', roles: ['admin', 'scanner', 'auditor', 'viewer'] },
+  { path: '#/assets', label: '자산 · 게이트', roles: ['admin', 'scanner', 'auditor', 'viewer'] },
+  { path: '#/consents', label: '동의 · 범위', roles: ['admin', 'scanner', 'auditor', 'viewer'] },
+  { path: '#/scans', label: '점검', roles: ['admin', 'scanner', 'auditor', 'viewer'] },
+  { path: '#/audit', label: '감사로그', roles: ['admin', 'auditor'] },
+];
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [route, setRoute] = useState(location.hash || '#/');
+  const [reportJob, setReportJob] = useState(null);
+  const [toastNode, toast] = useToast();
+
+  useEffect(() => {
+    const onHash = () => setRoute(location.hash || '#/');
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  useEffect(() => {
+    if (tokenStore.get()) api('GET', '/api/me').then((r) => { if (r.ok) setUser(r.json); else location.hash = '#/login'; });
+  }, []);
+
+  if (!user || route === '#/login') return html`<${Login} onLogin=${setUser} />`;
+
+  const logout = () => { tokenStore.clear(); setUser(null); location.hash = '#/login'; };
+  const navTitle = NAV.find((n) => n.path === route && n.roles.includes(user.role))?.label;
+  const title = reportJob ? '리포트' : (navTitle || (['admin', 'scanner'].includes(user.role) ? '⚡ 빠른 점검' : '대시보드'));
+
+  const canScan = ['admin', 'scanner'].includes(user.role);
+  let page;
+  if (reportJob) page = html`<${Report} jobId=${reportJob} onBack=${() => setReportJob(null)} />`;
+  else if (route === '#/assets') page = html`<${Assets} user=${user} toast=${toast} />`;
+  else if (route === '#/consents') page = html`<${Consents} user=${user} toast=${toast} />`;
+  else if (route === '#/scans') page = html`<${Scans} user=${user} toast=${toast} onOpenReport=${setReportJob} />`;
+  else if (route === '#/audit') page = html`<${Audit} />`;
+  else if (route === '#/dashboard') page = html`<${Dashboard} />`;
+  else page = canScan
+    ? html`<${Quick} user=${user} toast=${toast} onOpenReport=${setReportJob} />`
+    : html`<${Dashboard} />`;
+
+  const isHero = !reportJob && route === '#/' && canScan;
+  const goMain = (e) => { if (e) e.preventDefault(); setReportJob(null); location.hash = '#/'; };
+
+  return html`
+    <div>
+      <header class="appbar">
+        <a class="brand" href="#/" title="메인으로" onClick=${goMain}>
+          <span class="logo">🛡</span>SENTINEL<small>ASM</small>
+        </a>
+        <nav>
+          ${NAV.filter((n) => n.roles.includes(user.role)).map((n) => html`
+            <a key=${n.path} href=${n.path} class=${route === n.path && !reportJob ? 'active' : ''} onClick=${() => setReportJob(null)}>${n.label}</a>`)}
+        </nav>
+        <div class="who">
+          <span><b>${user.displayName || user.email}</b> <span class="role-badge">${user.role}</span></span>
+          <span class="muted">${user.tenantName || user.tenantId}</span>
+          <a href="#" onClick=${logout}>로그아웃</a>
+        </div>
+      </header>
+      ${isHero
+        ? html`<div class="container" style=${{ paddingTop: 0 }}>${page}</div>`
+        : html`<div class="container">
+            <div class="page-title">${title}</div>
+            ${page}
+          </div>`}
+    </div>
+    ${toastNode}`;
+}
+
+createRoot(document.getElementById('root')).render(html`<${App} />`);

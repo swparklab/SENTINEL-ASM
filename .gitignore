@@ -1,0 +1,15 @@
+node_modules/
+dist/
+data/
+*.log
+_docx_extract/
+_doc_text.txt
+.env
+
+# 민감 자료 — 공개 저장소에 올리지 않음
+# 대외비(Confidential) 설계문서
+*.docx
+SENTINEL-ASM_설계문서.docx
+# 출원 전 특허 초안 (공개 시 신규성 상실 위험)
+patent-*.md
+patent-.md
