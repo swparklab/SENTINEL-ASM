@@ -7,6 +7,7 @@
 import type { Finding } from '../../types.js';
 import type { Scanner, ScanContext } from './types.js';
 import { mk } from './asm.js';
+import { CVE_FEED, lessThan } from './feed.js';
 
 interface HeaderRule { header: string; title: string; severity: Finding['severity']; remediation: string; }
 
@@ -178,6 +179,41 @@ export const configScanner: Scanner = {
       if (csp && !/require-trusted-types-for/i.test(csp)) {
         findings.push(mk('config', 'info', 'Trusted Types 미적용', ctx.asset.value, 'CSP 가 있으나 require-trusted-types-for 가 없어 DOM 기반 XSS 완화가 부족합니다.', csp.slice(0, 120), "require-trusted-types-for 'script' 적용을 검토하십시오."));
       }
+      // ── 보안 리포팅 인프라 (Report-To / NEL / Expect-CT) ──
+      if (!root.headers['report-to'] && !root.headers['reporting-endpoints']) {
+        findings.push(mk('config', 'info', 'Report-To/Reporting-Endpoints 미설정', ctx.asset.value, '브라우저 보안 위반 리포트(CSP·COOP·NEL 등)를 수신하는 엔드포인트가 없어 공격 시도를 가시화할 수 없습니다.', 'no Report-To', 'Reporting-Endpoints 헤더와 CSP report-to 지시문을 설정하십시오.'));
+      }
+      if (!root.headers['nel']) {
+        findings.push(mk('config', 'info', 'NEL(Network Error Logging) 미설정', ctx.asset.value, '네트워크 오류·연결 실패 이상이 모니터링되지 않습니다.', 'no NEL', 'NEL 헤더를 설정하여 네트워크 이상을 수집하십시오.'));
+      }
+      // Expect-CT 는 폐기됐지만 잔존 시 max-age=0 권고
+      if (root.headers['expect-ct'] && !/max-age=0/.test(root.headers['expect-ct']!)) {
+        findings.push(mk('config', 'info', 'Expect-CT 잔존(폐기 헤더)', ctx.asset.value, 'Expect-CT 는 Chrome 브라우저에서 폐기되었습니다(2022). max-age=0 으로 비활성화하거나 제거하십시오.', root.headers['expect-ct'], 'Expect-CT 를 제거하거나 max-age=0 으로 설정하십시오.'));
+      }
+
+      // ── 서버 헤더 버전 → CVE 피드 대조 (경쟁사 대비 심화) ──
+      const serverHeader = root.headers['server'] || root.headers['x-powered-by'] || '';
+      if (serverHeader && ctx.deep) {
+        const serverCveRules: { re: RegExp; product: string }[] = [
+          { re: /nginx\/([\d.]+)/i, product: 'nginx' },
+          { re: /apache\/([\d.]+)/i, product: 'apache' },
+          { re: /openssl\/([\d.]+)/i, product: 'openssl' },
+          { re: /microsoft-iis\/([\d.]+)/i, product: 'iis' },
+          { re: /php\/([\d.]+)/i, product: 'php' },
+        ];
+        for (const rule of serverCveRules) {
+          const m = rule.re.exec(serverHeader);
+          if (m && m[1]) {
+            for (const entry of CVE_FEED) {
+              if (entry.product === rule.product && entry.ecosystem === 'service' && lessThan(m[1], entry.vulnerableBelow)) {
+                const sev: Finding['severity'] = entry.cvss >= 9 ? 'critical' : entry.cvss >= 7 ? 'high' : 'medium';
+                findings.push({ ...mk('config', sev, `${entry.cve}: ${entry.title} (서버 헤더 버전 탐지)`, ctx.asset.value, `서버 헤더에서 ${rule.product} ${m[1]} 버전이 탐지되어 알려진 CVE 에 노출됩니다.`, `${serverHeader.slice(0, 60)} → ${rule.product}@${m[1]}`, entry.remediation), cvss: entry.cvss, epss: entry.epss, cve: entry.cve });
+              }
+            }
+          }
+        }
+      }
+
       // Vary 헤더 부재 (캐시 포이즈닝/콘텐츠 협상 오류 표면)
       if (!('vary' in root.headers) && root.headers['cache-control'] && !/no-store/.test((root.headers['cache-control'] || '').toLowerCase())) {
         findings.push(mk('config', 'info', 'Vary 헤더 부재', ctx.asset.value, '캐시되는 응답에 Vary 가 없어 캐시 포이즈닝/콘텐츠 혼선 표면이 됩니다.', `cache-control=${root.headers['cache-control']}`, 'Vary 로 캐시 키에 영향을 주는 헤더를 명시하십시오.'));

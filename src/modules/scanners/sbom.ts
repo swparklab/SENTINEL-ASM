@@ -163,13 +163,58 @@ const f = (severity: Finding['severity'], title: string, target: string, descrip
   ({ id: id('fnd'), module: 'cve', severity, title, target, description, evidence, remediation, confidence: 'firm' });
 
 const FILE_SECRET_RULES: [RegExp, string][] = [
-  [/AKIA[0-9A-Z]{16}/, 'AWS Access Key'], [/sk_live_[0-9a-zA-Z]{16,}/, 'Stripe Secret Key'],
-  [/xox[baprs]-[0-9A-Za-z-]{10,}/, 'Slack Token'], [/AIza[0-9A-Za-z_\-]{35}/, 'Google API Key'],
-  [/gh[pousr]_[0-9A-Za-z]{30,}/, 'GitHub Token'], [/github_pat_[0-9A-Za-z_]{60,}/, 'GitHub PAT'],
-  [/glpat-[0-9A-Za-z_-]{20}/, 'GitLab Token'], [/npm_[A-Za-z0-9]{36}/, 'npm Token'],
-  [/SG\.[\w-]{22}\.[\w-]{43}/, 'SendGrid Key'], [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'Private Key'],
+  [/AKIA[0-9A-Z]{16}/, 'AWS Access Key'],
+  [/sk_live_[0-9a-zA-Z]{16,}/, 'Stripe Secret Key'],
+  [/sk_test_[0-9a-zA-Z]{16,}/, 'Stripe Test Key'],
+  [/xox[baprs]-[0-9A-Za-z-]{10,}/, 'Slack Token'],
+  [/AIza[0-9A-Za-z_\-]{35}/, 'Google API Key'],
+  [/gh[pousr]_[0-9A-Za-z]{30,}/, 'GitHub Token'],
+  [/github_pat_[0-9A-Za-z_]{60,}/, 'GitHub PAT'],
+  [/glpat-[0-9A-Za-z_-]{20}/, 'GitLab Token'],
+  [/npm_[A-Za-z0-9]{36}/, 'npm Token'],
+  [/SG\.[\w-]{22}\.[\w-]{43}/, 'SendGrid Key'],
+  [/AC[a-z0-9]{32}/, 'Twilio Account SID'],
+  [/sk-[A-Za-z0-9]{48}/, 'OpenAI API Key'],
+  [/sk-ant-[A-Za-z0-9\-_]{86,}/, 'Anthropic API Key'],
+  [/FLWSECK-[a-f0-9]{32}/, 'Flutterwave Secret'],
+  [/sq0csp-[A-Za-z0-9\-_]{43}/, 'Square OAuth'],
+  [/[A-Za-z0-9]{20}:[A-Za-z0-9-_]{20,}/, 'Potential API Key Pattern'],
+  [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'Private Key'],
   [/(?:password|secret|token|api[_-]?key|access[_-]?key|db[_-]?password|connectionstring)\s*[:=]\s*['"][^'"\s${<]{8,}['"]/i, '하드코딩 자격증명'],
 ];
+
+/** SPDX 라이선스 상업 이용 위험 등급 */
+const LICENSE_RISK: Record<string, 'high' | 'medium' | 'info'> = {
+  'GPL-2.0': 'high', 'GPL-3.0': 'high', 'AGPL-3.0': 'high',
+  'LGPL-2.0': 'medium', 'LGPL-2.1': 'medium', 'LGPL-3.0': 'medium',
+  'SSPL-1.0': 'high', 'BUSL-1.1': 'medium', 'Commons-Clause': 'high',
+  'CC-BY-SA-4.0': 'medium', 'CC-BY-NC-4.0': 'high',
+};
+
+/** 라이선스 스캔 — package.json / composer.json 에서 SPDX 라이선스 추출. */
+export function scanLicenses(filename: string, content: string): Finding[] {
+  const out: Finding[] = [];
+  const fn = (filename || '').toLowerCase();
+  if (!fn.includes('package.json') && !fn.includes('composer.json')) return out;
+  try {
+    const j = JSON.parse(content);
+    const license: string = j.license || j.licence || '';
+    if (!license) return out;
+    const risk = LICENSE_RISK[license];
+    if (risk) {
+      out.push({
+        id: `fnd_lic_${Date.now()}`, module: 'cve', severity: risk === 'high' ? 'high' : 'medium',
+        title: `상업 이용 위험 라이선스: ${license}`,
+        target: filename,
+        description: `${license} 라이선스는 상업 소프트웨어에 배포·통합 시 법적 리스크가 있습니다(코드 공개 의무 또는 상업 이용 제한).`,
+        evidence: `license=${license}`,
+        remediation: `법무팀과 ${license} 호환성을 검토하거나 상업 친화적 라이선스(MIT/Apache-2.0)로 대체하십시오.`,
+        confidence: 'confirmed',
+      });
+    }
+  } catch { /* JSON 파싱 실패 — 생략 */ }
+  return out;
+}
 const PLACEHOLDER = /CHANGEME|xxxx|example|placeholder|your_|<.*>|\$\{|dummy|test123/i;
 
 /** EOL 런타임 표 (오프라인 정적, 메이저:EOL일자). */

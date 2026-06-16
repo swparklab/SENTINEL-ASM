@@ -10,6 +10,7 @@ import type { Finding } from '../../types.js';
 import type { Scanner, ScanContext } from './types.js';
 import { PORT_SERVICE, STANDARD_PORTS, DEEP_PORTS } from './types.js';
 import { CVE_FEED, lessThan } from './feed.js';
+import { queryCrtSh, detectInternalNaming } from './ctlog.js';
 
 const SUBDOMAIN_WORDLIST = ['www', 'mail', 'api', 'dev', 'staging', 'test', 'admin', 'vpn', 'gw', 'git', 'jenkins', 'portal', 'beta', 'old', 'backup'];
 const SUBDOMAIN_DEEP = [...SUBDOMAIN_WORDLIST,
@@ -44,6 +45,30 @@ export const asmScanner: Scanner = {
         if (flat.length) {
           wildcardIps = new Set(flat);
           findings.push(mk('asm', 'info', '와일드카드 DNS(catch-all) 설정', host, '임의 서브도메인이 모두 응답합니다. 피싱·쿠키 범위 오염·열거 오탐의 원인이 됩니다.', `wildcard→${[...wildcardIps].slice(0, 3).join(', ')}`, '와일드카드 레코드 사용을 최소화하고 명시적 레코드를 사용하십시오.'));
+        }
+      }
+
+      // ── CT 로그 마이닝 (심층, crt.sh 무료 공개 API) ──────────────────────
+      if (ctx.deep) {
+        ctx.log('asm: crt.sh CT 로그 조회 중…');
+        const ctEntries = await queryCrtSh(host).catch(() => []);
+        if (ctEntries.length) {
+          // 내부 명명 규칙 탐지 (staging-/vpn-/internal- 등)
+          const internalNames = detectInternalNaming(ctEntries);
+          if (internalNames.length) {
+            findings.push(mk('asm', 'medium', `CT 로그 내부 호스트명 노출 ${internalNames.length}건`, host,
+              '공인 인증서 SAN 필드에 내부 명명 규칙(staging/vpn/internal 등)이 포함되어 인프라 구조가 드러납니다.',
+              internalNames.slice(0, 10).join('\n'),
+              '내부 호스트명 인증서는 사설 CA 또는 와일드카드로 발급하고 공인 CT 로그에 기록되지 않도록 분리하십시오.'));
+          }
+          // 워드리스트가 놓친 추가 서브도메인 인벤토리
+          const newHosts = ctEntries.map(e => e.hostname).filter(h => !h.startsWith('*') && h !== host);
+          if (newHosts.length > 0) {
+            findings.push(mk('asm', 'info', `CT 로그 기반 서브도메인 ${newHosts.length}건 발견`, host,
+              '공인 CT 로그에 등록된 인증서로부터 워드리스트 열거가 놓친 서브도메인을 추가 식별했습니다.',
+              [...new Set(newHosts)].slice(0, 20).join('\n'),
+              '불필요한 서브도메인 인증서는 폐기하고 미사용 호스트는 제거하십시오.'));
+          }
         }
       }
 
@@ -186,6 +211,25 @@ export const asmScanner: Scanner = {
         if (apexAAAA.length) findings.push(mk('asm', 'info', 'IPv6(AAAA) 노출 — 보호 비대칭 점검 필요', host, 'IPv6 주소가 노출되어 있습니다. IPv4 와 동등한 통제 적용을 확인하십시오.', `AAAA=${apexAAAA.slice(0, 3).join(', ')}`, 'IPv6 에도 동등한 방화벽/접근통제를 적용하십시오.'));
         if (nsList.length) { const provs = new Set(nsList.map((n) => n.split('.').slice(-2).join('.').toLowerCase())); if (provs.size === 1) findings.push(mk('asm', 'info', `단일 DNS 사업자 의존(SPOF): ${[...provs][0]}`, host, '모든 NS 가 단일 사업자라 사업자 장애 시 도메인 전체 가용성에 영향이 있습니다.', `NS=${nsList.join(', ')}`, '복수 DNS 사업자로 이중화하십시오.'));
         }
+
+        // DNSSEC — DoH(Cloudflare)로 DNSKEY 존재 여부 확인 (비파괴 공개 API)
+        try {
+          const dohRes = await fetch(`https://cloudflare-dns.com/dns-query?name=${host}&type=DNSKEY`, {
+            signal: AbortSignal.timeout(5000),
+            headers: { accept: 'application/dns-json' },
+          });
+          const dohJson = await dohRes.json() as any;
+          const hasDnsKey = dohJson?.Answer?.some((r: any) => r.type === 48);
+          if (!hasDnsKey) {
+            findings.push(mk('asm', 'info', 'DNSSEC 미적용', host, 'DNSSEC 가 없으면 DNS 캐시 포이즈닝(카밍스키 공격)에 취약합니다.', 'no DNSKEY', 'DNSSEC 를 적용하고 상위 존에 DS 레코드를 등록하십시오.'));
+          }
+        } catch { /* DoH 접근 불가 — 생략 */ }
+
+        // BIMI (Brand Indicators for Message Identification) — 이메일 브랜딩 보안
+        const bimiTxt = (await ctx.guard.resolveTxt(`default._bimi.${host}`)).find(r => /v=bimi1/i.test(r));
+        if (!bimiTxt && mx.length) {
+          findings.push(mk('asm', 'info', 'BIMI 레코드 미설정', host, 'BIMI 가 없으면 브랜드 로고 메일 표시(지원 클라이언트)가 불가하고 이메일 인증 완성도가 낮습니다.', 'no default._bimi TXT', 'DMARC p=quarantine|reject 달성 후 BIMI 레코드를 게시하십시오.'));
+        }
       }
     }
 
@@ -241,6 +285,12 @@ export const asmScanner: Scanner = {
         if (t.sigalg && /sha1|md5/i.test(t.sigalg)) findings.push(mk('asm', 'high', `약한 인증서 서명알고리즘: ${t.sigalg}`, host, 'SHA-1/MD5 서명은 충돌 위험으로 폐기되었습니다.', t.sigalg, 'SHA-256 이상 서명 인증서로 재발급하십시오.'));
         if (t.validityDays !== null && t.validityDays > 398) findings.push(mk('asm', 'low', `인증서 유효기간 과다(${t.validityDays}일 > 398)`, host, 'CA/B 포럼 한도(398일)를 초과합니다.', `validity=${t.validityDays}d`, '유효기간을 398일 이하로 발급하십시오.'));
         if (t.validFrom && Date.parse(t.validFrom) > Date.now()) findings.push(mk('asm', 'medium', '인증서 notBefore 미래(미시작)', host, '인증서 시작일이 미래입니다(시계 오류/미시작).', `validFrom=${t.validFrom}`, '시스템 시계와 발급 시점을 점검하십시오.'));
+        // HTTP/2 지원 여부 (ALPN)
+        if (t.alpn) {
+          if (!t.http2) findings.push(mk('asm', 'info', `HTTP/2 미지원 (ALPN: ${t.alpn})`, host, 'HTTP/2 를 지원하지 않습니다. 성능·보안 헤더 효율성이 낮습니다.', `alpn=${t.alpn}`, 'HTTP/2(h2) 를 활성화하십시오.'));
+        }
+        // OCSP Stapling — 인증서 해지 확인 효율성
+        if (!t.ocspUrl) findings.push(mk('asm', 'info', 'OCSP URL 부재 (해지 확인 경로 없음)', host, 'OCSP URL 이 없어 클라이언트가 인증서 해지 상태를 실시간 확인하기 어렵습니다.', 'no OCSP AIA', 'OCSP URL 을 포함한 인증서로 재발급하고 OCSP Stapling 을 서버에서 활성화하십시오.'));
 
         if (ctx.deep) {
           // 버전 매트릭스

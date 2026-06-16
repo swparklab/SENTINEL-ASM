@@ -168,7 +168,7 @@ async function main() {
       byCat[k] = (byCat[k] ?? 0) + 1;
     }
     const bySev: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-    for (const f of findings) bySev[f.severity as string]++;
+    for (const f of findings) { const s = f.severity as string; if (s in bySev) (bySev as any)[s]++; }
 
     console.log(`\n  [${label}] — ${elapsed}초 소요`);
     console.log(`  총 발견: ${findings.length}건`);

@@ -60,6 +60,7 @@ export class EgressGuard {
     subject: string | null; issuer: string | null; daysToExpiry: number | null;
     san: string[]; bits: number | null; selfSigned: boolean; hostnameMismatch: boolean;
     sigalg: string | null; keyType: string | null; keyBits: number | null; validityDays: number | null;
+    alpn: string | null; http2: boolean; ocspUrl: string | null; sctCount: number;
   } | null> {
     this.assertAllowed(host);
     return new Promise((resolve) => {
@@ -89,12 +90,26 @@ export class EgressGuard {
             if (det?.modulusLength) keyBits = det.modulusLength;
           }
         } catch { /* 런타임 미지원 시 bits 만 사용 */ }
+        // ALPN·HTTP/2 탐지
+        const alpnRaw: unknown = (socket as any).alpnProtocol;
+        const alpnStr = alpnRaw && typeof alpnRaw === 'string' ? alpnRaw : null;
+        // OCSP URL 추출 (인증서 AIA 확장)
+        let ocspUrl: string | null = null;
+        try {
+          const ext = (cert as any)?.infoAccess?.['OCSP - URI'];
+          if (ext) ocspUrl = Array.isArray(ext) ? (ext[0] ?? null) : ext;
+        } catch { /* */ }
+        // SCT(서명된 인증서 타임스탬프) 수 — CT 정책 준수 지표
+        const sctCount: number = (() => {
+          try { return (cert as any)?.extensions?.find((e: any) => e?.oid === '1.3.6.1.4.1.11129.2.4.2')?.value?.length ?? 0; } catch { return 0; }
+        })();
         finish({
           protocol: socket.getProtocol(),
           validTo, validFrom,
           subject: cert?.subject?.CN ?? null, issuer: cert?.issuer?.CN ?? null,
           daysToExpiry: days, validityDays, san, bits: (cert as any)?.bits ?? null,
           selfSigned, hostnameMismatch, sigalg, keyType, keyBits,
+          alpn: alpnStr, http2: alpnStr === 'h2', ocspUrl, sctCount,
         });
       });
       socket.once('timeout', () => finish(null));

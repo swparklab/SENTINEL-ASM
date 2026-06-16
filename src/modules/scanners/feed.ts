@@ -151,6 +151,36 @@ export const CVE_FEED: CveEntry[] = [
   // ───────── Cargo (Rust) ─────────
   { cve: 'RUSTSEC-2023-0001', product: 'openssl', vulnerableBelow: '0.10.48', cvss: 7.5, epss: 0.10, kev: false, ecosystem: 'cargo',
     title: 'rust openssl 크레이트 use-after-free', remediation: 'openssl 크레이트 0.10.48 이상으로 업그레이드.' },
+
+  // ───────── 2023–2024 고위험 CVE ─────────
+  { cve: 'CVE-2023-44487', product: 'nginx', vulnerableBelow: '1.25.3', cvss: 7.5, epss: 0.92, kev: true, ecosystem: 'service',
+    title: 'HTTP/2 Rapid Reset DoS (nginx)', remediation: 'nginx 1.25.3 이상 업그레이드 또는 http2_max_concurrent_streams 제한.' },
+  { cve: 'CVE-2023-25690', product: 'apache', vulnerableBelow: '2.4.56', cvss: 9.8, epss: 0.83, kev: true, ecosystem: 'service',
+    title: 'Apache HTTP Server HTTP Request Smuggling', remediation: 'Apache httpd 2.4.56 이상으로 업그레이드.' },
+  { cve: 'CVE-2024-4577', product: 'php', vulnerableBelow: '8.3.8', cvss: 9.8, epss: 0.95, kev: true, ecosystem: 'service',
+    title: 'PHP CGI 윈도우 인자 주입 RCE', remediation: 'PHP 8.1.29/8.2.20/8.3.8 이상으로 업그레이드.' },
+  { cve: 'CVE-2024-6387', product: 'openssh', vulnerableBelow: '9.8p1', cvss: 8.1, epss: 0.88, kev: true, ecosystem: 'service',
+    title: 'OpenSSH regreSSHion RCE (race condition)', remediation: 'OpenSSH 9.8p1 이상으로 업그레이드.' },
+  { cve: 'CVE-2023-46604', product: 'activemq', vulnerableBelow: '5.15.16', cvss: 10.0, epss: 0.97, kev: true, ecosystem: 'maven',
+    title: 'Apache ActiveMQ RCE (랜섬웨어 악용)', remediation: 'ActiveMQ 5.15.16/5.16.7/5.17.6/5.18.3 이상으로 업그레이드.' },
+  { cve: 'CVE-2024-21626', product: 'runc', vulnerableBelow: '1.1.12', cvss: 8.6, epss: 0.72, kev: true, ecosystem: 'go',
+    title: 'runc Leaky Vessels 컨테이너 탈출', remediation: 'runc 1.1.12 이상으로 업그레이드. Docker/Kubernetes 업데이트.' },
+  { cve: 'CVE-2023-20198', product: 'iis', vulnerableBelow: '10.0.99999', cvss: 10.0, epss: 0.97, kev: true, ecosystem: 'service',
+    title: 'Cisco IOS XE Web UI 권한상승(제로데이) — IIS 노출 비교 신호', remediation: '관련 서비스 접근 제한 및 패치 적용.' },
+  { cve: 'CVE-2024-3094', product: 'xz-utils', vulnerableBelow: '5.6.1', cvss: 10.0, epss: 0.80, kev: true, ecosystem: 'service',
+    title: 'XZ Utils 백도어 (sshd 원격 코드 실행)', remediation: 'xz-utils 5.4.x(안전 버전)으로 다운그레이드. 5.6.0/5.6.1 사용 즉시 중단.' },
+  // npm 추가
+  { cve: 'CVE-2024-29180', product: 'webpack-dev-middleware', vulnerableBelow: '7.1.0', cvss: 7.4, epss: 0.35, kev: false, ecosystem: 'npm',
+    title: 'webpack-dev-middleware 경로 우회', remediation: 'webpack-dev-middleware 7.1.0 이상으로 업그레이드.' },
+  { cve: 'CVE-2024-37890', product: 'ws', vulnerableBelow: '8.17.1', cvss: 7.5, epss: 0.28, kev: false, ecosystem: 'npm',
+    title: 'ws WebSocket 라이브러리 DoS', remediation: 'ws 8.17.1 이상으로 업그레이드.' },
+  { cve: 'CVE-2023-26115', product: 'word-wrap', vulnerableBelow: '1.2.4', cvss: 7.5, epss: 0.18, kev: false, ecosystem: 'npm',
+    title: 'word-wrap ReDoS', remediation: 'word-wrap 1.2.4 이상으로 업그레이드.' },
+  // PyPI 추가
+  { cve: 'CVE-2024-3651', product: 'idna', vulnerableBelow: '3.7', cvss: 7.5, epss: 0.25, kev: false, ecosystem: 'pypi',
+    title: 'idna DoS (slow codec)', remediation: 'idna 3.7 이상으로 업그레이드.' },
+  { cve: 'CVE-2024-35195', product: 'requests', vulnerableBelow: '2.32.0', cvss: 5.6, epss: 0.15, kev: false, ecosystem: 'pypi',
+    title: 'requests SSRF via proxies', remediation: 'requests 2.32.0 이상으로 업그레이드.' },
 ];
 
 /** "1.18.0" 형태를 비교 가능한 숫자 배열로. */
