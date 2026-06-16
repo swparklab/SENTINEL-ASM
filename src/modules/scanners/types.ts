@@ -20,8 +20,10 @@ export interface ScanContext {
 /** 심층 점검용 확장 포트 세트 (간단 점검보다 광범위). */
 export const DEEP_PORTS = [
   20, 21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 161, 389, 443, 445, 465,
-  587, 636, 993, 995, 1433, 1521, 2049, 2375, 2379, 3000, 3306, 3389, 5000, 5432,
-  5601, 5672, 5900, 6379, 7001, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9092, 9200, 11211, 27017,
+  587, 636, 993, 995, 1433, 1521, 1883, 2049, 2181, 2375, 2376, 2379, 3000, 3306, 3389,
+  4369, 4646, 5000, 5432, 5601, 5672, 5900, 5984, 6379, 6443, 7001, 8000, 8008, 8080,
+  8081, 8086, 8088, 8443, 8500, 8883, 8888, 9000, 9042, 9092, 9200, 9300, 9990, 10250,
+  11211, 15672, 25672, 27017,
 ];
 
 export interface Scanner {
@@ -44,4 +46,8 @@ export const PORT_SERVICE: Record<number, string> = {
   6379: 'Redis', 7001: 'WebLogic', 8000: 'HTTP-alt', 8008: 'HTTP-alt', 8080: 'HTTP-alt',
   8081: 'HTTP-alt', 8443: 'HTTPS-alt', 8888: 'HTTP-alt', 9000: 'SonarQube/PHP-FPM',
   9092: 'Kafka', 9200: 'Elasticsearch', 11211: 'Memcached', 27017: 'MongoDB',
+  1883: 'MQTT', 2181: 'ZooKeeper', 2376: 'Docker-TLS', 4369: 'Erlang-EPMD', 4646: 'Nomad',
+  5984: 'CouchDB', 6443: 'K8s-API', 8086: 'InfluxDB', 8088: 'Hadoop-YARN', 8500: 'Consul',
+  8883: 'MQTT-TLS', 9042: 'Cassandra', 9300: 'ES-transport', 9990: 'WildFly-mgmt',
+  10250: 'kubelet', 15672: 'RabbitMQ-mgmt', 25672: 'RabbitMQ-dist',
 };

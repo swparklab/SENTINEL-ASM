@@ -20,9 +20,86 @@ const T10 = {
   A05: 'A05:2021 보안 설정 오류',
   A06: 'A06:2021 취약하거나 오래된 컴포넌트',
   A07: 'A07:2021 식별 및 인증 실패',
+  A04: 'A04:2021 안전하지 않은 설계',
+  A10: 'A10:2021 서버측 요청 위조(SSRF)',
 };
 
 const CLASSES: Klass[] = [
+  {
+    // 개인정보(PII) 평문 노출
+    match: (f) => /개인정보|PII|주민(등록)?번호|신용카드|휴대전화|사업자등록/.test(f.title),
+    cwe: 'CWE-359', owasp: T10.A02,
+    references: ['https://cwe.mitre.org/data/definitions/359.html', 'https://www.pipc.go.kr'],
+    frameworks: [
+      { framework: 'ISMS-P', control: '3.2 개인정보 보호조치 / 2.7 암호화' },
+      { framework: 'ISO27001', control: 'A.5.34 PII 보호 / A.8.24 암호화' },
+      { framework: 'GDPR-PIPA', control: '개인정보보호법 제29조 / GDPR Art.32·34' },
+      { framework: 'OWASP-Top10', control: T10.A02 },
+      { framework: 'PCI-DSS', control: '3 카드데이터 보호' },
+    ],
+  },
+  {
+    // SSRF / 클라우드 메타데이터
+    match: (f) => /SSRF|메타데이터|서버측 요청/.test(f.title),
+    cwe: 'CWE-918', owasp: T10.A10,
+    references: ['https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/', 'https://cwe.mitre.org/data/definitions/918.html'],
+    frameworks: [
+      { framework: 'ISMS-P', control: '2.11.1 보안 취약점 점검' },
+      { framework: 'ISO27001', control: 'A.8.28 보안 코딩' },
+      { framework: 'OWASP-ASVS', control: 'V12 파일·리소스 / V5 검증' },
+      { framework: 'OWASP-Top10', control: T10.A10 },
+    ],
+  },
+  {
+    // 경로 트래버설 / LFI
+    match: (f) => /트래버설|traversal|LFI|RFI|경로 우회|passwd/.test(f.title),
+    cwe: 'CWE-22', owasp: T10.A01,
+    references: ['https://owasp.org/www-community/attacks/Path_Traversal', 'https://cwe.mitre.org/data/definitions/22.html'],
+    frameworks: [
+      { framework: 'ISMS-P', control: '2.11.1 보안 취약점 점검' },
+      { framework: 'ISO27001', control: 'A.8.28 보안 코딩' },
+      { framework: 'OWASP-ASVS', control: 'V12 파일·리소스' },
+      { framework: 'OWASP-Top10', control: T10.A01 },
+    ],
+  },
+  {
+    // SQL 오류/인젝션 표면
+    match: (f) => /SQL|인젝션|injection|스택트레이스|디버그|오류 노출/.test(f.title),
+    cwe: 'CWE-89', owasp: T10.A03,
+    references: ['https://owasp.org/Top10/A03_2021-Injection/', 'https://cwe.mitre.org/data/definitions/89.html'],
+    frameworks: [
+      { framework: 'ISMS-P', control: '2.11.1 보안 취약점 점검' },
+      { framework: 'ISO27001', control: 'A.8.28 보안 코딩' },
+      { framework: 'OWASP-ASVS', control: 'V5 검증·인젝션' },
+      { framework: 'OWASP-Top10', control: T10.A03 },
+      { framework: 'PCI-DSS', control: '6.2.4 인젝션 방지' },
+    ],
+  },
+  {
+    // IaC/컨테이너/CI 하드닝 (안전하지 않은 설계/설정)
+    match: (f) => /Dockerfile|compose|k8s|Terraform|IaC|CI |파이프라인|privileged|런타임/.test(f.title),
+    cwe: 'CWE-1357', owasp: T10.A05,
+    references: ['https://owasp.org/Top10/A05_2021-Security_Misconfiguration/', 'https://cwe.mitre.org/data/definitions/1357.html'],
+    frameworks: [
+      { framework: 'ISMS-P', control: '2.10.1 보안시스템 운영 / 2.11.2 취약점 조치' },
+      { framework: 'ISO27001', control: 'A.8.9 구성 관리 / A.8.8 기술적 취약성' },
+      { framework: 'OWASP-Top10', control: T10.A05 },
+      { framework: 'NIST-CSF', control: 'PR.IP-1 보안 기준 구성' },
+    ],
+  },
+  {
+    // 인증/세션/토큰 (JWT·OIDC·CSRF·기본자격)
+    match: (f) => /JWT|토큰|OIDC|OAuth|CSRF|기본 ?자격|세션 고정|로그인 폼|평문.*전송|Basic/.test(f.title),
+    cwe: 'CWE-287', owasp: T10.A07,
+    references: ['https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/', 'https://cwe.mitre.org/data/definitions/287.html'],
+    frameworks: [
+      { framework: 'ISMS-P', control: '2.5 인증 및 권한관리' },
+      { framework: 'ISO27001', control: 'A.5.17 인증정보 / A.8.5 보안 인증' },
+      { framework: 'OWASP-ASVS', control: 'V2 인증 / V3 세션' },
+      { framework: 'OWASP-Top10', control: T10.A07 },
+      { framework: 'EFRR', control: '전자금융감독규정 제13조 접근통제' },
+    ],
+  },
   {
     // 알려진 취약점/구식 컴포넌트 (CVE/SBOM)
     match: (f) => f.module === 'cve' || /구식|버전|컴포넌트|CVE-/.test(f.title),
@@ -69,8 +146,8 @@ const CLASSES: Klass[] = [
     ],
   },
   {
-    // 전송계층/암호화 (TLS/HSTS/인증서/쿠키 Secure)
-    match: (f) => /TLS|HSTS|인증서|HTTPS|암호|프로토콜|secure|쿠키/i.test(f.title),
+    // 전송계층/암호화 (TLS/HSTS/인증서/쿠키 Secure/암호스위트/PFS)
+    match: (f) => /TLS|HSTS|인증서|HTTPS|암호|프로토콜|secure|쿠키|PFS|키교환|cipher|서명알고리즘|RSA 키|혼합 콘텐츠|평문/i.test(f.title),
     cwe: 'CWE-319', owasp: T10.A02,
     references: ['https://owasp.org/Top10/A02_2021-Cryptographic_Failures/', 'https://cwe.mitre.org/data/definitions/319.html'],
     frameworks: [

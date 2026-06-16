@@ -2,6 +2,15 @@
 
 상태 범례: **✅ 구현됨**(DNS·HTTP·TLS 비파괴, 심층 모드) · **🔌 외부 피드 필요**(유료 API/데이터셋 연동 시 가능) · **⚠ 연구/위험 영역**(능동·고위험 기법으로 별도 승인·환경 필요, 현재 보류)
 
+> **v2 확장(전문가 갭분석 반영)**: 비파괴·Node 표준만으로 구현 가능한 누락 항목 다수를 심층 점검에 추가했습니다 —
+> TLS 전수(버전 매트릭스·약한 암호군·PFS·인증서 SAN/자가서명/짧은키/약한서명/유효기간), 인증서 SAN 마이닝, 와일드카드 DNS 보정,
+> 공개 DNS 사설IP 노출, dangling NS·SOA·SRV·CNAME·PTR·MX 위생, SPF 중복/ptr/pct, 배너 그랩→서비스 CVE,
+> Redis/Memcached/ES/Kibana/CouchDB 무인증 단서, robots/sitemap 역노출, 오류 스택트레이스·SQL 오류·디렉터리 트래버설·PII(주민/카드/전화),
+> JWT 구조 약점·CSRF 폼·로그인 평문·OIDC discovery·OpenAPI 파싱·CORS preflight·GraphQL 배칭/GET·WebSocket 노출,
+> 디버그/추적 헤더·COEP·Permissions/Referrer 품질·캐시 공유·.well-known 전수·백업/임시·에디터/IDE/인프라 파일·런타임 설정,
+> 그리고 소프트웨어 파일: yarn/pnpm/Gemfile/Cargo/Pipfile/poetry/composer/gradle/.csproj 파서, 업로드 시크릿,
+> Dockerfile/IaC(compose·k8s·terraform)/CI 하드닝 린트, EOL 런타임, 설치 훅·비고정 의존성.
+
 > 본 엔진은 **비파괴(non-destructive)** 원칙과 **egress allowlist** 를 지키며, 외부 데이터에 의존하지 않고 자체 관측 가능한 항목만 ✅ 로 구현했습니다. 🔌/⚠ 항목은 "되는 척" 하지 않고 명시적으로 미구현으로 둡니다.
 
 ## 1. 인프라·자산 상관분석 (OSINT 심화)

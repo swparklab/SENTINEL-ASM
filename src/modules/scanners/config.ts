@@ -276,14 +276,186 @@ export const configScanner: Scanner = {
                 break;
               }
             }
+            // 미참조 소스맵 직접 확인 (sourceMappingURL 주석 제거 케이스)
+            if (!mapRef) {
+              const mp2 = await ctx.guard.httpGet(url + '.map');
+              if (mp2 && mp2.status === 200 && /"sources"\s*:/.test(mp2.body)) {
+                findings.push({ ...mk('config', 'medium', '소스맵(.map) 직접 노출 — 원본 소스 복원 가능', ctx.asset.value, '주석 참조가 없어도 .map 이 직접 접근되어 원본 소스를 복원할 수 있습니다.', url + '.map', '운영 배포에서 .map 접근을 차단하십시오.'), confidence: 'confirmed' });
+              }
+            }
+            // 세션 토큰 URL/localStorage 사용 신호
+            if (/localStorage\.setItem\(\s*['"](?:access_?token|jwt|auth_?token|id_?token)/i.test(js.body)) findings.push(mk('config', 'medium', '토큰을 localStorage 에 저장(XSS 탈취 표면)', ctx.asset.value, '인증 토큰을 localStorage 에 보관하면 XSS 발생 시 탈취됩니다.', url, 'HttpOnly 쿠키 기반 세션으로 전환하십시오.'));
           }
         }
+      }
+
+      // ── §3 추가 헤더 품질 ──
+      // COEP / 보조 헤더군
+      const coop = root.headers['cross-origin-opener-policy'];
+      if (coop && !root.headers['cross-origin-embedder-policy']) findings.push(mk('config', 'info', 'COEP 미설정(교차출처 격리 미완성)', ctx.asset.value, 'COOP 는 있으나 COEP 가 없어 crossOriginIsolated 가 미달성되어 Spectre 완화가 불완전합니다.', 'no Cross-Origin-Embedder-Policy', 'Cross-Origin-Embedder-Policy: require-corp 적용을 검토하십시오.'));
+      if (root.headers['x-permitted-cross-domain-policies'] === 'all') findings.push(mk('config', 'low', 'X-Permitted-Cross-Domain-Policies: all (과허용)', ctx.asset.value, 'Adobe 교차도메인 정책이 전체 허용입니다.', 'all', "'none' 으로 제한하십시오."));
+      // Permissions-Policy 품질
+      const pp = root.headers['permissions-policy'];
+      if (pp && /(geolocation|camera|microphone|payment|usb)=\*/.test(pp)) findings.push(mk('config', 'info', 'Permissions-Policy 광범위 허용', ctx.asset.value, '민감 브라우저 기능이 전체(*) 허용되어 있습니다.', pp.slice(0, 120), '필요한 출처(self)로 제한하십시오.'));
+      // Referrer-Policy 품질
+      const rp = root.headers['referrer-policy'];
+      if (rp && /unsafe-url|no-referrer-when-downgrade/i.test(rp)) findings.push(mk('config', 'low', `약한 Referrer-Policy: ${rp}`, ctx.asset.value, '전체 URL(토큰 포함)이 교차출처/평문으로 누출될 수 있습니다.', rp, 'strict-origin-when-cross-origin 으로 변경하십시오.'));
+      // 디버그/추적 헤더
+      const dbgHeaders = Object.keys(root.headers).filter((h) => /^(x-debug|x-debug-token|x-trace-id|x-request-id|x-correlation-id|x-amzn-trace-id|x-runtime|x-application-context|x-envoy-upstream-service-time|x-backend-server|x-served-by)$/i.test(h));
+      if (dbgHeaders.length) findings.push(mk('config', root.headers['x-debug-token-link'] ? 'medium' : 'low', `디버그/추적 헤더 노출: ${dbgHeaders.slice(0, 4).join(', ')}`, ctx.asset.value, '게이트웨이/분산추적/내부 백엔드 식별 정보가 헤더로 노출됩니다.', dbgHeaders.map((h) => `${h}: ${root.headers[h]}`).join('\n').slice(0, 160), '운영에서 디버그/내부 식별 헤더를 제거하십시오.'));
+      // 캐시 공유 위험 (인증 응답이 공유캐시에 저장될 신호)
+      const xcache = ['x-cache', 'cf-cache-status', 'x-varnish', 'age'].filter((h) => root.headers[h]);
+      if (setCookie && xcache.length && /public/i.test(root.headers['cache-control'] || '')) findings.push(mk('config', 'medium', '인증 응답 공유캐시 저장 위험(web cache)', ctx.asset.value, '쿠키 설정 응답이 public 캐시 가능 + 캐시 계층 존재로 사용자별 응답이 공유될 수 있습니다.', `${xcache.join(',')} | cache-control=${root.headers['cache-control']}`, '인증 응답에 Cache-Control: private, no-store 적용.'));
+
+      // ── §3 응답 본문 정보 노출 ──
+      const intLeak = scanInternal(root.body, root.headers, ctx.asset.value);
+      if (intLeak.length) findings.push(mk('config', 'medium', `응답 내 내부 정보 노출 ${intLeak.length}건(사설IP/내부경로)`, ctx.asset.value, '응답에 사설 IP·서버 절대경로·내부 호스트명이 노출됩니다.', intLeak.slice(0, 6).join('\n'), '에러/응답에서 내부 토폴로지 정보를 제거하십시오.'));
+      // HTML/주석 시크릿
+      for (const s of scanSecrets(root.body, 'HTML/주석')) findings.push({ ...mk('config', 'critical', `응답 본문 하드코딩 시크릿: ${s.label}`, ctx.asset.value, `HTML/주석에 ${s.label} 로 보이는 시크릿이 노출됩니다.`, `${s.where} → ${s.sample}`, '시크릿 제거 및 즉시 폐기·재발급.'), confidence: 'firm' });
+      // 응답 내 JWT 구조 약점
+      for (const f of scanJwt(root.body + ' ' + (setCookie || ''), ctx.asset.value)) findings.push(f);
+
+      // ── §6 robots/sitemap 역노출 ──
+      const robots = await ctx.guard.httpGet(base + '/robots.txt');
+      if (robots && robots.status === 200 && /(^|\n)\s*(dis)?allow:/i.test(robots.body) && !/<html/i.test(robots.body)) {
+        const paths = [...robots.body.matchAll(/(?:disallow|allow):\s*(\S+)/gi)].map((m) => m[1]!).filter((p) => /admin|backup|private|internal|config|db|secret|\.git|\.env|old|tmp|test|staging|wp-admin|cgi-bin|server-status|api|upload/i.test(p));
+        if (paths.length) findings.push(mk('config', 'low', `robots.txt 가 민감 경로 ${paths.length}건 역노출`, ctx.asset.value, 'robots.txt 의 Disallow 가 오히려 숨기려는(=존재하는) 민감 경로를 알려줍니다.', paths.slice(0, 8).join('\n'), 'robots.txt 로 민감 경로를 노출하지 말고 접근통제를 적용하십시오.'));
+      }
+
+      // ── §6 빌드/메타 + 런타임 설정 ──
+      for (const p of ['/version.json', '/build-info.json', '/humans.txt', '/env.js', '/config.json', '/runtime-config.json', '/assets/config.json']) {
+        const r = await ctx.guard.httpGet(base + p);
+        if (r && r.status === 200 && r.body && !isSoft404(r) && !/<html/i.test(r.body)) {
+          const sev = /env\.js|config/.test(p) ? 'medium' : 'info';
+          findings.push(mk('config', sev as Finding['severity'], `빌드/런타임 설정 노출: ${p}`, ctx.asset.value + p, '버전·빌드·런타임 설정(내부 API/플래그/키)이 노출될 수 있습니다.', r.body.slice(0, 100).replace(/\s+/g, ' '), '운영에서 불필요한 메타/설정 노출을 제거하십시오.'));
+          for (const s of scanSecrets(r.body, p)) findings.push({ ...mk('config', 'critical', `설정 파일 하드코딩 시크릿: ${s.label} (${p})`, ctx.asset.value + p, `${p} 에 ${s.label} 로 보이는 시크릿이 노출됩니다.`, s.sample, '시크릿 제거 및 폐기·재발급.'), confidence: 'firm' });
+        }
+      }
+
+      // ── §6 백업/임시 파생 파일 ──
+      for (const f of ['/index.php', '/config.php', '/app.js', '/main.js', '/web.config', '/.env']) {
+        for (const ext of ['~', '.bak', '.old', '.save', '.swp']) {
+          const r = await ctx.guard.httpGet(base + f + ext);
+          if (r && r.status === 200 && r.body && !isSoft404(r) && (/<\?php|=|function|server\.|<configuration/i.test(r.body)) && !/<!doctype html|<html/i.test(r.body.slice(0, 200))) {
+            findings.push({ ...mk('config', 'high', `백업/임시 파일 노출: ${f}${ext}`, ctx.asset.value + f + ext, '소스/설정의 백업·임시 사본이 외부에 노출됩니다.', r.body.slice(0, 60).replace(/\s+/g, ' '), '백업/임시 파일을 웹루트에서 제거하십시오.'), confidence: 'firm' });
+            break;
+          }
+        }
+      }
+
+      // ── §10 .well-known 표준 리소스 ──
+      for (const [p, sev, note] of [['/.well-known/security.txt', 'info', 'security.txt'], ['/.well-known/change-password', 'info', 'change-password'], ['/.well-known/assetlinks.json', 'info', 'Android assetlinks'], ['/.well-known/apple-app-site-association', 'info', 'iOS AASA'], ['/.well-known/nodeinfo', 'info', 'nodeinfo'], ['/.well-known/ai-plugin.json', 'low', 'AI plugin manifest']] as [string, Finding['severity'], string][]) {
+        const r = await ctx.guard.httpGet(base + p);
+        if (r && r.status === 200 && r.body && !/<html/i.test(r.body.slice(0, 100))) {
+          if (/aasa|apple-app/i.test(note) && /applinks|appID|webcredentials/i.test(r.body)) findings.push(mk('config', 'info', `iOS AASA 노출(앱 식별/경로 패턴)`, ctx.asset.value + p, '앱 ID·내부 경로 패턴이 노출됩니다.', r.body.slice(0, 100).replace(/\s+/g, ' '), '의도된 노출인지 확인하십시오.'));
+        }
+      }
+      // JWKS 약한 키
+      const jwks = await ctx.guard.httpGet(base + '/.well-known/jwks.json');
+      if (jwks && jwks.status === 200 && /"keys"\s*:/.test(jwks.body)) {
+        if (/"alg"\s*:\s*"(none|HS\d+)"/i.test(jwks.body)) findings.push(mk('config', 'medium', 'JWKS 약한 alg(none/HS) 노출', ctx.asset.value, 'JWKS 에 none/대칭(HS) 알고리즘이 포함되어 토큰 위조 표면이 됩니다.', jwks.body.slice(0, 120), '비대칭(RS/ES) 서명만 허용하십시오.'));
+      }
+
+      // ── §4 인증/세션 ──
+      // 로그인 폼 CSRF / 평문 전송
+      for (const lp of ['/login', '/signin', '/admin', '/user/login', '/account/login', '/wp-login.php']) {
+        const r = await ctx.guard.httpGet(base + lp);
+        if (!r || r.status !== 200 || !/<form[^>]*method\s*=\s*["']?post/i.test(r.body)) continue;
+        const form = (r.body.match(/<form[\s\S]{0,1200}?<\/form>/i) || [''])[0]!;
+        const hasCsrf = /name=["'](csrf|_token|authenticity_token|__RequestVerificationToken|xsrf|_csrf)/i.test(form) || /xsrf-token|csrf-token/i.test(r.headers['set-cookie'] || '') || /<meta[^>]+csrf-token/i.test(r.body);
+        if (/type=["']password/i.test(form) && !hasCsrf) findings.push({ ...mk('config', 'medium', `로그인 폼 CSRF 방어 미관측: ${lp}`, ctx.asset.value + lp, 'CSRF 토큰/SameSite 신호가 관측되지 않습니다(SPA 런타임 주입 가능).', lp, 'CSRF 토큰 또는 SameSite=Strict 쿠키를 적용하십시오.'), confidence: 'tentative' });
+        const actionHttp = /<form[^>]+action=["']http:\/\//i.test(form);
+        if (/type=["']password/i.test(form) && actionHttp) findings.push(mk('config', 'high', `로그인 폼 평문(HTTP) 전송: ${lp}`, ctx.asset.value + lp, '자격증명 폼이 평문 HTTP 로 전송됩니다(도청 위험).', form.match(/action=["']([^"']+)/i)?.[1] || '', '폼 action 을 HTTPS 로 전환하십시오.'));
+        break;
+      }
+      // OIDC discovery 약점
+      const oidc = await ctx.guard.httpGet(base + '/.well-known/openid-configuration');
+      if (oidc && oidc.status === 200 && /"issuer"|"authorization_endpoint"/.test(oidc.body)) {
+        try {
+          const j = JSON.parse(oidc.body);
+          const w: string[] = [];
+          if ((j.token_endpoint_auth_methods_supported || []).includes('none')) w.push('공개클라이언트 무인증(none)');
+          if (j.code_challenge_methods_supported && !j.code_challenge_methods_supported.includes('S256')) w.push('PKCE S256 미지원');
+          if ((j.response_types_supported || []).some((t: string) => /token/.test(t))) w.push('암묵흐름(implicit) 허용');
+          if ((j.grant_types_supported || []).includes('password')) w.push('ROPC(password) 허용');
+          if ((j.id_token_signing_alg_values_supported || []).some((a: string) => /none|HS/i.test(a))) w.push('id_token none/HS 서명');
+          if (typeof j.jwks_uri === 'string' && j.jwks_uri.startsWith('http://')) w.push('jwks_uri 평문');
+          if (w.length) findings.push(mk('config', 'medium', `OIDC 구성 약점: ${w.join(', ')}`, ctx.asset.value, 'OIDC discovery 문서에 위험 설정이 노출됩니다.', w.join(' / '), '공개 흐름 제거, PKCE S256, 비대칭 서명, HTTPS jwks 를 적용하십시오.'));
+        } catch { /* */ }
+      }
+
+      // ── §5 API ──
+      // OpenAPI/Swagger 파싱 → 숨은 엔드포인트/인증 누락
+      for (const sp of ['/openapi.json', '/swagger.json', '/v3/api-docs', '/api-docs', '/swagger/v1/swagger.json']) {
+        const r = await ctx.guard.httpGet(base + sp);
+        if (!r || r.status !== 200 || !/"(openapi|swagger)"\s*:/.test(r.body)) continue;
+        try {
+          const spec = JSON.parse(r.body);
+          const paths = Object.keys(spec.paths || {});
+          const adminPaths = paths.filter((p) => /admin|internal|debug|secret|delete|drop/i.test(p));
+          findings.push(mk('config', 'medium', `OpenAPI 스펙 공개 — 엔드포인트 ${paths.length}건 노출`, ctx.asset.value + sp, 'API 명세가 공개되어 전체 엔드포인트·파라미터가 드러납니다.', `paths=${paths.length}${adminPaths.length ? ` (관리/위험: ${adminPaths.slice(0, 4).join(', ')})` : ''}`, '운영에서 API 문서 노출을 인증 뒤로 제한하십시오.'));
+          if (!spec.security && !spec.components?.securitySchemes) findings.push(mk('config', 'low', 'OpenAPI 전역 보안 정의 부재', ctx.asset.value + sp, '스펙에 보안 스킴이 정의되지 않아 인증 없는 엔드포인트일 수 있습니다.', 'no security/securitySchemes', 'API 인증 스킴을 정의·적용하십시오.'));
+        } catch { /* */ }
+        break;
+      }
+      // CORS preflight 과허용
+      const pre = await ctx.guard.httpGet(base + '/', { method: 'OPTIONS', headers: { origin: 'https://sentinel-cors-probe.example', 'access-control-request-method': 'DELETE', 'access-control-request-headers': 'authorization,x-custom' } });
+      if (pre) {
+        const acm = (pre.headers['access-control-allow-methods'] || '').toUpperCase();
+        const ah = (pre.headers['access-control-allow-headers'] || '');
+        if (/PUT|DELETE|PATCH/.test(acm) && pre.headers['access-control-allow-origin']) findings.push(mk('config', 'medium', `CORS preflight 변경 메서드 과허용: ${acm}`, ctx.asset.value, 'preflight 가 PUT/DELETE/PATCH 등 상태변경 메서드를 교차출처에 허용합니다.', `Allow-Methods=${acm} Allow-Headers=${ah}`, '교차출처 허용 메서드를 최소화하십시오.'));
+        if (ah === '*' || /authorization/i.test(ah)) findings.push(mk('config', 'low', 'CORS preflight Authorization 헤더 허용', ctx.asset.value, 'Authorization 등 민감 헤더를 교차출처 요청에 허용합니다.', `Allow-Headers=${ah}`, '허용 헤더를 신뢰 출처·필수 헤더로 제한하십시오.'));
+      }
+      // GraphQL 배칭/GET 실행
+      if (gql && gql.status < 500 && /__schema|"data"|GraphQL|errors/i.test(gql.body)) {
+        const arr = await ctx.guard.httpGet(base + '/graphql', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '[{"query":"{__typename}"},{"query":"{__typename}"}]' });
+        if (arr && /"data"[\s\S]*"data"/.test(arr.body)) findings.push(mk('config', 'medium', 'GraphQL 배열 배칭 허용(브루트포스/증폭 표면)', ctx.asset.value, '배열 배칭이 허용되어 단일 요청에 다수 쿼리를 실행할 수 있습니다.', arr.body.slice(0, 80), '배치 비활성화 또는 복잡도/요청수 제한을 적용하십시오.'));
+        const get = await ctx.guard.httpGet(base + '/graphql?query=' + encodeURIComponent('{__typename}'));
+        if (get && get.status === 200 && /"__typename"|"data"/.test(get.body)) findings.push(mk('config', 'medium', 'GraphQL GET 실행 허용(CSRF 표면)', ctx.asset.value, 'GET 으로 GraphQL 쿼리가 실행되어 CSRF 표면이 됩니다.', get.body.slice(0, 60), 'GET 실행을 비활성화하고 POST+CSRF 보호를 적용하십시오.'));
+      }
+
+      // ── §5 WebSocket 노출 단서 ──
+      const wsRefs = [...root.body.matchAll(/wss?:\/\/[^"'\s]+|new\s+WebSocket\s*\(/gi)].slice(0, 3);
+      if (wsRefs.length) {
+        const plain = root.body.match(/ws:\/\/[^"'\s]+/i);
+        findings.push(mk('config', plain ? 'medium' : 'info', plain ? 'WebSocket 평문(ws://) 사용' : 'WebSocket 엔드포인트 노출', ctx.asset.value, plain ? '평문 ws:// 연결은 도청·변조에 취약합니다(CSWSH Origin 검증도 확인 필요).' : 'WebSocket 엔드포인트가 식별됩니다. Origin 검증(CSWSH) 적용을 확인하십시오.', (plain ? plain[0] : wsRefs[0]![0]).slice(0, 80), 'wss:// 사용 및 서버측 Origin 검증을 적용하십시오.'));
       }
     }
 
     return findings;
   },
 };
+
+/** 응답 본문/헤더의 내부 정보(사설IP/절대경로/내부호스트) 추출. */
+function scanInternal(body: string, headers: Record<string, string>, selfHost: string): string[] {
+  const hits: string[] = [];
+  const text = body.slice(0, 60_000) + ' ' + ['location', 'x-backend-server', 'x-served-by', 'x-real-ip', 'via'].map((h) => headers[h] || '').join(' ');
+  for (const m of text.matchAll(/\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})\b/g)) {
+    if (m[1] && !m[1].includes(selfHost)) hits.push(`사설IP: ${m[1]}`);
+    if (hits.length > 8) break;
+  }
+  for (const m of text.matchAll(/(\/var\/www\/[^\s"'<]+|\/home\/[\w.-]+\/[^\s"'<]+|C:\\(?:inetpub|Users|xampp)\\[^\s"'<]+|\/srv\/[^\s"'<]+)/g)) { hits.push(`경로: ${m[1]!.slice(0, 60)}`); if (hits.length > 12) break; }
+  for (const m of text.matchAll(/\b[\w-]+\.(?:internal|local|corp|svc\.cluster\.local)\b/g)) { hits.push(`내부호스트: ${m[0]}`); if (hits.length > 16) break; }
+  return [...new Set(hits)];
+}
+
+/** 본문/쿠키 내 JWT 추출·구조 약점 판정. */
+function scanJwt(text: string, selfHost: string): Finding[] {
+  const out: Finding[] = [];
+  const seen = new Set<string>();
+  for (const m of text.matchAll(/eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.([A-Za-z0-9_-]*)/g)) {
+    const tok = m[0]!; if (seen.has(tok) || seen.size > 3) continue; seen.add(tok);
+    try {
+      const header = JSON.parse(Buffer.from(tok.split('.')[0]!, 'base64url').toString('utf8'));
+      const payload = JSON.parse(Buffer.from(tok.split('.')[1]!, 'base64url').toString('utf8'));
+      if (String(header.alg).toLowerCase() === 'none' || !m[1]) out.push({ ...mk('config', 'high', 'JWT alg:none/서명없음(위조 가능)', selfHost, '응답에 노출된 JWT 가 서명이 없어 위조 가능합니다.', `alg=${header.alg}`, 'alg 를 서버에서 고정 검증하고 none 을 거부하십시오.'), confidence: 'firm' });
+      else if (/^HS/i.test(String(header.alg))) out.push(mk('config', 'medium', `JWT 대칭키 서명(${header.alg})`, selfHost, '대칭키(HS) 서명은 키 유출 시 위조가 가능합니다.', `alg=${header.alg}`, '비대칭(RS/ES) 서명을 사용하십시오.'));
+      if (!payload.exp) out.push(mk('config', 'medium', 'JWT 만료(exp) 부재(영구 토큰)', selfHost, '노출된 JWT 에 만료가 없어 탈취 시 영구 사용됩니다.', 'no exp', 'exp 를 설정하십시오.'));
+      if (payload.password || payload.is_admin || payload.role || payload.ssn) out.push(mk('config', 'info', 'JWT 페이로드 민감 클레임 평문', selfHost, 'JWT payload 는 누구나 디코드 가능하므로 민감 정보를 담지 마십시오.', Object.keys(payload).filter((k) => /password|admin|role|ssn/.test(k)).join(','), '민감 클레임을 제거하십시오.'));
+    } catch { /* JWT 아님 */ }
+  }
+  return out;
+}
 
 /** 심층 점검 전용 추가 민감 경로 (콘텐츠 검증). */
 const DEEP_PATHS: PathRule[] = [
@@ -301,8 +473,44 @@ const DEEP_PATHS: PathRule[] = [
   { path: '/trace.axd', title: 'ASP.NET trace.axd 노출', severity: 'medium', sig: (b) => /Application Trace|Request Details/i.test(b), remediation: 'trace 비활성화' },
   { path: '/elmah.axd', title: 'ELMAH 오류 로그 노출', severity: 'high', sig: (b) => /Error Log for|ELMAH/i.test(b), remediation: 'ELMAH 접근 제한' },
   { path: '/crossdomain.xml', title: 'crossdomain.xml 와일드카드', severity: 'low', sig: (b) => /allow-access-from domain="\*"/.test(b), remediation: '교차 도메인 정책을 신뢰 도메인으로 제한' },
-  { path: '/.well-known/openid-configuration', title: 'OIDC 설정 노출(정보)', severity: 'info', sig: (b) => /authorization_endpoint|issuer/.test(b), remediation: '의도된 노출인지 확인(일반적으로 정상)' },
+  { path: '/.vscode/settings.json', title: '.vscode 설정 노출', severity: 'low', sig: (b) => /"[\w.]+":/.test(b) && !/<html/i.test(b), remediation: '.vscode 디렉터리 배포 제외' },
+  { path: '/.idea/workspace.xml', title: 'JetBrains .idea 노출', severity: 'low', sig: (b) => /<project|<component/.test(b), remediation: '.idea 디렉터리 배포 제외' },
+  { path: '/.bash_history', title: '.bash_history 노출', severity: 'high', sig: (b) => /\b(cd|ls|export|sudo|ssh|curl|git)\b/.test(b) && !/<html/i.test(b), remediation: '셸 히스토리 파일 제거·차단' },
+  { path: '/.netrc', title: '.netrc 자격증명 노출', severity: 'critical', sig: (b) => /machine\s+\S+\s+login/.test(b), remediation: '차단 및 자격증명 폐기' },
+  { path: '/.pgpass', title: 'PostgreSQL .pgpass 노출', severity: 'critical', sig: (b) => /:\d{2,5}:.*:.*:/.test(b) && !/<html/i.test(b), remediation: '차단 및 DB 비밀번호 교체' },
+  { path: '/.docker/config.json', title: 'Docker 레지스트리 자격증명 노출', severity: 'critical', sig: (b) => /"auths"/.test(b), remediation: '차단 및 레지스트리 토큰 폐기' },
+  { path: '/.kube/config', title: 'Kubernetes kubeconfig 노출', severity: 'critical', sig: (b) => /apiVersion:|clusters:|client-key-data/.test(b), remediation: '차단 및 클러스터 자격증명 교체' },
+  { path: '/terraform.tfstate', title: 'Terraform state 노출', severity: 'critical', sig: (b) => /"terraform_version"|"resources"/.test(b), remediation: 'tfstate 를 원격 백엔드로 이전·차단' },
+  { path: '/credentials.json', title: 'GCP 서비스계정 키 노출', severity: 'critical', sig: (b) => /"private_key_id"|"private_key"/.test(b), remediation: '차단 및 서비스계정 키 폐기' },
+  { path: '/dump.sql', title: 'DB 덤프(dump.sql) 노출', severity: 'critical', sig: (b) => /CREATE TABLE|INSERT INTO|DROP TABLE/i.test(b), remediation: 'DB 덤프 제거·차단' },
+  { path: '/WEB-INF/web.xml', title: 'Java web.xml 노출', severity: 'high', sig: (b) => /<web-app|<servlet/.test(b), remediation: 'WEB-INF 외부 접근 차단' },
+  { path: '/server.key', title: 'TLS 개인키(server.key) 노출', severity: 'critical', sig: (b) => /PRIVATE KEY/.test(b), remediation: '즉시 차단 및 인증서·키 재발급' },
 ];
+
+/** 시크릿 정규식 (HTML/JS/JSON 공통, 플레이스홀더 제외). */
+const SECRET_RULES: [RegExp, string][] = [
+  [/AKIA[0-9A-Z]{16}/, 'AWS Access Key'],
+  [/sk_live_[0-9a-zA-Z]{16,}/, 'Stripe Secret Key'],
+  [/xox[baprs]-[0-9A-Za-z-]{10,}/, 'Slack Token'],
+  [/AIza[0-9A-Za-z_\-]{35}/, 'Google API Key'],
+  [/gh[pousr]_[0-9A-Za-z]{30,}/, 'GitHub Token'],
+  [/github_pat_[0-9A-Za-z_]{60,}/, 'GitHub Fine-grained PAT'],
+  [/glpat-[0-9A-Za-z_-]{20}/, 'GitLab Token'],
+  [/npm_[A-Za-z0-9]{36}/, 'npm Token'],
+  [/SG\.[\w-]{22}\.[\w-]{43}/, 'SendGrid Key'],
+  [/SK[0-9a-f]{32}/, 'Twilio Key'],
+  [/eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*/, 'JWT'],
+  [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'Private Key'],
+  [/(?:aws_secret_access_key|secret_access_key)["'\s:=]+[A-Za-z0-9/+]{40}/i, 'AWS Secret Key'],
+];
+function scanSecrets(text: string, where: string): { label: string; where: string; sample: string }[] {
+  const out: { label: string; where: string; sample: string }[] = [];
+  for (const [re, label] of SECRET_RULES) {
+    const m = re.exec(text);
+    if (m && !/CHANGEME|xxxx|example|placeholder|YOUR_|<.*>|\$\{/i.test(m[0])) out.push({ label, where, sample: m[0].slice(0, 10) + '…' });
+  }
+  return out;
+}
 
 /** 두 응답 본문이 사실상 동일한지(soft-404 판정). 길이 + 접두 비교. */
 function similar(a: string, b: string): boolean {

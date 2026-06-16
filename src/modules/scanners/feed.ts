@@ -14,8 +14,8 @@ export interface CveEntry {
   kev: boolean;     // CISA KEV 등재 여부
   title: string;
   remediation: string;
-  /** 생태계 — SBOM 매칭/표시용 (npm·pypi·maven·os 등). 미지정 시 서비스 핑거프린트 대상. */
-  ecosystem?: 'npm' | 'pypi' | 'maven' | 'service';
+  /** 생태계 — SBOM 매칭/표시용. 미지정 시 서비스 핑거프린트 대상. */
+  ecosystem?: 'npm' | 'pypi' | 'maven' | 'service' | 'rubygems' | 'composer' | 'nuget' | 'cargo' | 'go';
 }
 
 export const CVE_FEED: CveEntry[] = [
@@ -127,6 +127,30 @@ export const CVE_FEED: CveEntry[] = [
     title: 'jackson-databind DoS(깊은 중첩)', remediation: 'jackson-databind 2.13.2.1 이상으로 업그레이드.' },
   { cve: 'CVE-2022-22978', product: 'spring-security', vulnerableBelow: '5.6.4', cvss: 9.1, epss: 0.50, kev: false, ecosystem: 'maven',
     title: 'Spring Security 인가 우회(정규식)', remediation: 'Spring Security 5.6.4 / 5.5.7 이상으로 업그레이드.' },
+
+  // ───────── RubyGems (Gemfile.lock) ─────────
+  { cve: 'CVE-2022-32209', product: 'rails-html-sanitizer', vulnerableBelow: '1.4.3', cvss: 8.2, epss: 0.30, kev: false, ecosystem: 'rubygems',
+    title: 'rails-html-sanitizer XSS', remediation: 'rails-html-sanitizer 1.4.3 이상으로 업그레이드.' },
+  { cve: 'CVE-2022-23633', product: 'rails', vulnerableBelow: '7.0.2.2', cvss: 6.5, epss: 0.20, kev: false, ecosystem: 'rubygems',
+    title: 'Rails(actionpack) 세션정보 누출', remediation: 'Rails 7.0.2.2 / 6.1.4.7 이상으로 업그레이드.' },
+  { cve: 'CVE-2022-24836', product: 'nokogiri', vulnerableBelow: '1.13.4', cvss: 7.5, epss: 0.25, kev: false, ecosystem: 'rubygems',
+    title: 'Nokogiri ReDoS', remediation: 'Nokogiri 1.13.4 이상으로 업그레이드.' },
+
+  // ───────── Composer (PHP) ─────────
+  { cve: 'CVE-2023-3823', product: 'symfony', vulnerableBelow: '5.4.26', cvss: 8.0, epss: 0.20, kev: false, ecosystem: 'composer',
+    title: 'Symfony XXE/정보노출', remediation: 'Symfony 5.4.26 / 6.2.13 이상으로 업그레이드.' },
+  { cve: 'CVE-2022-31090', product: 'guzzlehttp/guzzle', vulnerableBelow: '7.4.5', cvss: 6.5, epss: 0.18, kev: false, ecosystem: 'composer',
+    title: 'Guzzle 자격증명 누출(cross-domain)', remediation: 'guzzlehttp/guzzle 7.4.5 이상으로 업그레이드.' },
+  { cve: 'CVE-2021-3129', product: 'laravel/framework', vulnerableBelow: '8.4.3', cvss: 9.8, epss: 0.96, kev: false, ecosystem: 'composer',
+    title: 'Laravel Ignition RCE (디버그 모드)', remediation: 'laravel/framework 8.4.3 이상으로 업그레이드, 운영 디버그 비활성.' },
+
+  // ───────── NuGet (.NET) ─────────
+  { cve: 'CVE-2019-0820', product: 'newtonsoft.json', vulnerableBelow: '12.0.2', cvss: 7.5, epss: 0.22, kev: false, ecosystem: 'nuget',
+    title: 'Newtonsoft.Json ReDoS', remediation: 'Newtonsoft.Json 12.0.2 이상으로 업그레이드.' },
+
+  // ───────── Cargo (Rust) ─────────
+  { cve: 'RUSTSEC-2023-0001', product: 'openssl', vulnerableBelow: '0.10.48', cvss: 7.5, epss: 0.10, kev: false, ecosystem: 'cargo',
+    title: 'rust openssl 크레이트 use-after-free', remediation: 'openssl 크레이트 0.10.48 이상으로 업그레이드.' },
 ];
 
 /** "1.18.0" 형태를 비교 가능한 숫자 배열로. */

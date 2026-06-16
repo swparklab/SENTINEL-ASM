@@ -8,7 +8,8 @@ import { repos } from '../../db/store.js';
 import { audit } from '../../db/audit.js';
 import { id, now } from '../../util.js';
 import type { Asset, Consent, ScanIntensity, ScanJob } from '../../types.js';
-import { parseManifest, matchSbom } from '../scanners/sbom.js';
+import { parseManifest, matchSbom, staticFileAudit } from '../scanners/sbom.js';
+import { id as genId } from '../../util.js';
 import { prioritize } from '../risk/scoring.js';
 import { mapCompliance } from '../compliance/mapping.js';
 import { orchestrator } from '../orchestrator/orchestrator.js';
@@ -19,7 +20,13 @@ export function scanSoftware(tenantId: string, actor: string, filename: string, 
   job: ScanJob; format: string; componentCount: number;
 } {
   const { components, format } = parseManifest(filename, content);
-  let findings = matchSbom(components);
+  let findings = [...matchSbom(components), ...staticFileAudit(filename, content)];
+  // 매니페스트 미인식/0건 가시화 (커버리지 공백 투명 고지)
+  if (format === '미인식' && !findings.length) {
+    findings.push({ id: genId('fnd'), module: 'cve', severity: 'info', title: '매니페스트 형식 미인식', target: filename || 'file', description: '지원되는 의존성 매니페스트로 인식되지 않아 구성요소 CVE 대조를 수행하지 못했습니다.', evidence: `format=미인식`, remediation: 'package.json·requirements.txt·pom.xml·*.lock·SBOM(CycloneDX) 형식으로 제출하십시오.', confidence: 'firm' });
+  } else if (components.length === 0 && format !== '미인식') {
+    findings.push({ id: genId('fnd'), module: 'cve', severity: 'info', title: `${format} 파싱 결과 구성요소 0건`, target: filename || 'file', description: '형식은 인식되었으나 추출된 구성요소가 없습니다(형식 이상 또는 빈 파일).', evidence: `format=${format}`, remediation: '파일 내용을 확인하십시오.', confidence: 'firm' });
+  }
 
   const asset: Asset = {
     id: id('ast'), tenantId, type: 'software', value: filename || 'software-artifact',

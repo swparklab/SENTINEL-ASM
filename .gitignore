@@ -1,6 +1,7 @@
 node_modules/
 dist/
 data/
+.claude/
 *.log
 _docx_extract/
 _doc_text.txt
