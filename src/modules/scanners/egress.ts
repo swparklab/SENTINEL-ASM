@@ -123,6 +123,24 @@ export class EgressGuard {
     }
   }
 
+  async resolve6(host: string): Promise<string[]> {
+    this.assertAllowed(host);
+    try {
+      return await dns.resolve6(host);
+    } catch {
+      return [];
+    }
+  }
+
+  async resolveNs(host: string): Promise<string[]> {
+    this.assertAllowed(host);
+    try {
+      return await dns.resolveNs(host);
+    } catch {
+      return [];
+    }
+  }
+
   /** allowlist 검증을 거친 HTTP 요청 (비파괴, 기본 GET). */
   async httpGet(
     url: string,

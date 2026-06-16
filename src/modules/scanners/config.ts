@@ -173,10 +173,111 @@ export const configScanner: Scanner = {
       if (root.headers['set-cookie'] && !/no-store|private/.test(cache)) {
         findings.push(mk('config', 'info', '인증 응답 캐시 제어 미흡', ctx.asset.value, '세션 쿠키를 설정하는 응답에 no-store/private 캐시 정책이 없습니다.', `cache-control: ${root.headers['cache-control'] || '(없음)'}`, '인증/민감 응답에 Cache-Control: no-store 적용.'));
       }
-      // GraphQL 인트로스펙션 노출
+      // ── §3 헤더 심층 ──
+      // Trusted Types 미적용 (DOM XSS 완화 부재)
+      if (csp && !/require-trusted-types-for/i.test(csp)) {
+        findings.push(mk('config', 'info', 'Trusted Types 미적용', ctx.asset.value, 'CSP 가 있으나 require-trusted-types-for 가 없어 DOM 기반 XSS 완화가 부족합니다.', csp.slice(0, 120), "require-trusted-types-for 'script' 적용을 검토하십시오."));
+      }
+      // Vary 헤더 부재 (캐시 포이즈닝/콘텐츠 협상 오류 표면)
+      if (!('vary' in root.headers) && root.headers['cache-control'] && !/no-store/.test((root.headers['cache-control'] || '').toLowerCase())) {
+        findings.push(mk('config', 'info', 'Vary 헤더 부재', ctx.asset.value, '캐시되는 응답에 Vary 가 없어 캐시 포이즈닝/콘텐츠 혼선 표면이 됩니다.', `cache-control=${root.headers['cache-control']}`, 'Vary 로 캐시 키에 영향을 주는 헤더를 명시하십시오.'));
+      }
+      // 이중 클릭재킹 무방비 (XFO 와 CSP frame-ancestors 모두 부재)
+      if (!('x-frame-options' in root.headers) && !(csp && /frame-ancestors/i.test(csp))) {
+        findings.push(mk('config', 'medium', '클릭재킹 무방비 (XFO·frame-ancestors 모두 없음)', ctx.asset.value, '프레임 차단 수단이 전혀 없어 클릭재킹에 노출됩니다.', 'no XFO, no CSP frame-ancestors', "X-Frame-Options: DENY 또는 CSP frame-ancestors 'none' 적용."));
+      }
+      // 쿠키 프레임워크 지문
+      if (sc) {
+        const FW_COOKIES: [string, string][] = [['JSESSIONID', 'Java/Tomcat'], ['PHPSESSID', 'PHP'], ['connect.sid', 'Node/Express'], ['ASP.NET_SessionId', 'ASP.NET'], ['laravel_session', 'Laravel'], ['_django', 'Django']];
+        const fp = FW_COOKIES.find(([n]) => sc.includes(n));
+        if (fp) findings.push(mk('config', 'info', `세션 쿠키로 기술 스택 노출: ${fp[1]}`, ctx.asset.value, `세션 쿠키 명(${fp[0]})으로 백엔드 프레임워크가 식별됩니다.`, fp[0], '쿠키 명을 일반화하여 기술 스택 노출을 줄이십시오.'));
+      }
+      // CORS null origin + 정규식 결함
+      const corsNull = await ctx.guard.httpGet(base + '/', { headers: { origin: 'null' } });
+      if (corsNull && corsNull.headers['access-control-allow-origin'] === 'null') {
+        findings.push(mk('config', 'high', "CORS 'null' origin 허용", ctx.asset.value, "Origin: null 을 허용하면 sandboxed iframe·data: 문서에서 교차출처 접근이 가능합니다.", 'ACAO=null', "'null' origin 을 허용하지 마십시오."));
+      }
+      const corsRegex = await ctx.guard.httpGet(base + '/', { headers: { origin: `https://${ctx.asset.value}.sentinel-evil.example` } });
+      if (corsRegex && (corsRegex.headers['access-control-allow-origin'] || '').includes('sentinel-evil.example')) {
+        findings.push(mk('config', 'high', 'CORS Origin 정규식 검증 결함', ctx.asset.value, `접미사 일치 결함으로 '도메인.공격자.com' 형태가 허용됩니다.`, `ACAO=${corsRegex.headers['access-control-allow-origin']}`, 'Origin 을 정확 일치(==)로 검증하십시오.'));
+      }
+      // CDN/WAF 핑거프린팅
+      const CDN_SIG: [string, string][] = [['cf-ray', 'Cloudflare'], ['x-amz-cf-id', 'AWS CloudFront'], ['x-sucuri-id', 'Sucuri WAF'], ['x-akamai-transformed', 'Akamai'], ['x-iinfo', 'Imperva/Incapsula'], ['server', '']];
+      const cdnSig = CDN_SIG.map(([h, n]) => root.headers[h] ? (n || root.headers[h]) : null).filter(Boolean);
+      if (cdnSig.length) findings.push(mk('config', 'info', `CDN/WAF/서버 지문: ${cdnSig.slice(0, 3).join(', ')}`, ctx.asset.value, '응답 헤더로 CDN/WAF/서버 스택이 식별됩니다(오리진 직접 접근·우회 표면 점검 권장).', cdnSig.join(' | '), '오리진 IP 직접 노출 여부 및 WAF 우회 경로를 점검하십시오.'));
+
+      // ── §5 API 심층 ──
       const gql = await ctx.guard.httpGet(base + '/graphql', { method: 'POST', headers: { 'content-type': 'application/json' } });
-      if (gql && gql.status < 500 && /__schema|"data"|GraphQL/i.test(gql.body)) {
+      if (gql && gql.status < 500 && /__schema|"data"|GraphQL|errors/i.test(gql.body)) {
         findings.push(mk('config', 'low', 'GraphQL 엔드포인트 노출', ctx.asset.value, 'GraphQL 이 외부에 노출되어 인트로스펙션으로 스키마가 유출될 수 있습니다.', `status=${gql.status}`, '운영에서 인트로스펙션 비활성화 및 인증 적용.'));
+        // 필드 제안(field suggestion) 누출
+        const sug = await ctx.guard.httpGet(base + '/graphql?query=' + encodeURIComponent('{__typ}'), {});
+        if (sug && /Did you mean|있습니까|suggest/i.test(sug.body)) {
+          findings.push(mk('config', 'low', 'GraphQL 필드 제안(field suggestion) 누출', ctx.asset.value, '오타 시 유사 필드를 제안하여 인트로스펙션이 꺼져 있어도 스키마를 추론할 수 있습니다.', sug.body.slice(0, 80), '운영에서 필드 제안을 비활성화하십시오.'));
+        }
+      }
+      // REST 버전 병존 (폐기본 잔존)
+      for (const v of ['/v1/', '/api/v1/', '/v2/']) {
+        const rv = await ctx.guard.httpGet(base + v);
+        if (rv && [200, 401, 403].includes(rv.status) && !isSoft404(rv)) {
+          findings.push(mk('config', 'info', `API 버전 경로 노출: ${v}`, ctx.asset.value + v, '버전 경로가 응답합니다. 폐기된 구버전 API 가 잔존하는지 확인이 필요합니다.', `status=${rv.status}`, '폐기 버전은 제거하고 사용 중 버전만 노출하십시오.'));
+        }
+      }
+      // 레이트리밋 헤더 부재 (브루트포스/DoS 완화 신호)
+      if (!Object.keys(root.headers).some((h) => /ratelimit|x-rate-limit|retry-after/i.test(h))) {
+        findings.push(mk('config', 'info', '레이트리밋 헤더 미관측', ctx.asset.value, '응답에 RateLimit 헤더가 없어 브루트포스/남용 완화 정책이 노출되지 않습니다(부재일 수 있음).', '(no RateLimit headers)', '인증/민감 엔드포인트에 레이트리밋을 적용하고 표준 헤더를 노출하십시오.'));
+      }
+
+      // ── §6 공급망·코드 노출 ──
+      // 빌드/메타 파일 노출
+      for (const p of ['/version.json', '/build-info.json', '/humans.txt', '/.well-known/']) {
+        const r = await ctx.guard.httpGet(base + p);
+        if (r && r.status === 200 && r.body && !isSoft404(r)) {
+          findings.push(mk('config', 'info', `빌드/메타 노출: ${p}`, ctx.asset.value + p, '버전·빌드·인프라 메타가 노출되어 정찰에 활용될 수 있습니다.', r.body.slice(0, 80).replace(/\s+/g, ' '), '운영 환경에서 불필요한 메타 파일을 제거하십시오.'));
+        }
+      }
+      // 프론트엔드 번들: 소스맵 노출 + 하드코딩 시크릿 + SRI 누락
+      const scripts = [...root.body.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)].slice(0, 6);
+      for (const m of scripts) {
+        const raw = m[1]!;
+        const full = m[0]!;
+        const url = raw.startsWith('http') ? raw : base.replace(/\/$/, '') + (raw.startsWith('/') ? raw : '/' + raw);
+        const external = /^https?:\/\//.test(raw) && !url.startsWith(base);
+        // SRI 누락 (외부 스크립트)
+        if (external && !/\bintegrity=/.test(full)) {
+          findings.push(mk('config', 'low', `외부 스크립트 SRI(integrity) 누락`, ctx.asset.value, '서드파티 스크립트에 무결성 검증(SRI)이 없어 공급망 변조 시 그대로 실행됩니다.', raw.slice(0, 80), 'integrity + crossorigin 속성을 적용하십시오.'));
+        }
+        // 동일 출처 번들만 본문 스캔(범위 준수)
+        if (!external) {
+          const js = await ctx.guard.httpGet(url);
+          if (js && js.status === 200 && js.body) {
+            // 소스맵 노출
+            const mapRef = /sourceMappingURL=([^\s'"]+\.map)/.exec(js.body);
+            if (mapRef) {
+              const mapUrl = mapRef[1]!.startsWith('http') ? mapRef[1]! : url.replace(/\/[^/]*$/, '/') + mapRef[1]!;
+              const mp = await ctx.guard.httpGet(mapUrl);
+              if (mp && mp.status === 200 && /"sources"\s*:/.test(mp.body)) {
+                findings.push({ ...mk('config', 'medium', '소스맵(.map) 노출 — 원본 소스 복원 가능', ctx.asset.value, '소스맵으로 난독화 이전의 전체 프론트엔드 소스를 복원할 수 있습니다.', mapUrl, '운영 배포에서 소스맵을 제외하거나 접근을 차단하십시오.'), confidence: 'confirmed' });
+              }
+            }
+            // 하드코딩 시크릿
+            const secretRules: [RegExp, string][] = [
+              [/AKIA[0-9A-Z]{16}/, 'AWS Access Key'],
+              [/sk_live_[0-9a-zA-Z]{16,}/, 'Stripe Secret Key'],
+              [/xox[baprs]-[0-9A-Za-z-]{10,}/, 'Slack Token'],
+              [/AIza[0-9A-Za-z_\-]{35}/, 'Google API Key'],
+              [/gh[pousr]_[0-9A-Za-z]{30,}/, 'GitHub Token'],
+              [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'Private Key'],
+            ];
+            for (const [re, label] of secretRules) {
+              const hit = re.exec(js.body);
+              if (hit) {
+                findings.push({ ...mk('config', 'critical', `프론트엔드 번들 하드코딩 시크릿: ${label}`, ctx.asset.value, `JS 번들에 ${label} 로 보이는 시크릿이 노출되어 있습니다.`, `${url} → ${hit[0].slice(0, 8)}…`, '시크릿을 코드에서 제거하고 즉시 폐기·재발급하십시오.'), confidence: 'confirmed' });
+                break;
+              }
+            }
+          }
+        }
       }
     }
 
