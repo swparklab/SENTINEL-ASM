@@ -14,3 +14,6 @@ SENTINEL-ASM_설계문서.docx
 # 출원 전 특허 초안 (공개 시 신규성 상실 위험)
 patent-*.md
 patent-.md
+# 논문 초안 (미발표 연구, 저널 제출 전 비공개)
+paper-draft.md
+paper-*.md
