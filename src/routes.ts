@@ -13,7 +13,7 @@ import {
 import { issueOwnershipChallenge, verifyOwnership } from './modules/authorizationGate/ownership.js';
 import { revokeConsent, currentConsentStatus, computeEgressAllowlist } from './modules/authorizationGate/gate.js';
 import { orchestrator } from './modules/orchestrator/orchestrator.js';
-import { scanSoftware, scanDomainQuick } from './modules/quick/quick.js';
+import { scanSoftware, scanSoftwareProject, scanDomainQuick } from './modules/quick/quick.js';
 import { buildReport, reportToMarkdown, reportToHtml } from './modules/reports/report.js';
 import { aggregateRisk } from './modules/risk/scoring.js';
 import type { Asset, Consent } from './types.js';
@@ -208,7 +208,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
 
     // ───────────── 빠른 점검 (Quick Scan, 저마찰 진입점) ─────────────
-    // 1) 소프트웨어 파일(SBOM) 정적 분석 — 원격 트래픽 없음, 권한 절차 불필요
+    // 1a) 소프트웨어 단일 파일 정적 분석
     api.post('/api/quick/sbom', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
       const v = validate(z.object({
         filename: z.string().default('manifest'),
@@ -217,6 +217,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
       const { job, format, componentCount } = scanSoftware(req.auth!.tenantId, req.auth!.email, v.data.filename, v.data.content);
       return reply.code(201).send({ job, format, componentCount });
+    });
+
+    // 1b) 소프트웨어 프로젝트(폴더/다중 파일) 통합 정적 분석
+    api.post('/api/quick/sbom/project', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
+      const v = validate(z.object({
+        projectName: z.string().optional(),
+        files: z.array(z.object({ filename: z.string(), content: z.string() })).min(1).max(200),
+      }), req.body);
+      if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
+      const result = scanSoftwareProject(req.auth!.tenantId, req.auth!.email, v.data.files, v.data.projectName);
+      return reply.code(201).send(result);
     });
 
     // 2) 도메인/URL 빠른 점검 — 권한 보유 전자 확인(attestation) 필수

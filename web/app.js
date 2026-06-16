@@ -814,26 +814,59 @@ function Quick({ user, toast, onOpenReport }) {
   const [tab, setTab] = useState('domain');
   const canScan = ['admin', 'scanner'].includes(user.role);
 
-  // 소프트웨어 파일
-  const [filename, setFilename] = useState('');
-  const [content, setContent] = useState('');
+  // 소프트웨어 프로젝트(폴더/다중 파일)
+  const [projectFiles, setProjectFiles] = useState([]);   // [{ filename, content }]
+  const [projectName, setProjectName] = useState('');
   const [fileJob, setFileJob] = useState(null);
-  const [fileMeta, setFileMeta] = useState(null);
+  const [fileMeta, setFileMeta] = useState(null);   // { fileResults, totalFindings }
   const [busy, setBusy] = useState(false);
+  const [filename, setFilename] = useState('');    // 텍스트 붙여넣기용
+  const [content, setContent] = useState('');
 
-  const onFile = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setFilename(f.name);
-    setContent(await f.text());
+  // 분석 가치가 있는 파일 필터
+  const isRelevant = (name) => {
+    const n = name.toLowerCase().replace(/^.*[\\/]/, '');
+    return /^(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|requirements\.txt|pipfile\.lock|poetry\.lock|gemfile\.lock|cargo\.lock|composer\.lock|composer\.json|pom\.xml|build\.gradle|build\.gradle\.kts|go\.mod|go\.sum|dockerfile|docker-compose\.ya?ml|\.gitlab-ci\.yml|.*\.csproj|packages\.config|.*\.tf|.*\.tfvars)$/i.test(n) ||
+           /\.(github|gitlab|workflows|ci)\//i.test(name);
   };
-  const scanFile = async () => {
-    if (!content.trim()) return toast('파일 내용을 붙여넣거나 업로드하세요.', true);
-    setBusy(true);
-    const r = await api('POST', '/api/quick/sbom', { filename: filename || 'manifest', content });
+
+  const onFolderSelect = async (e) => {
+    const all = Array.from(e.target.files || []);
+    const relevant = all.filter((f) => isRelevant(f.webkitRelativePath || f.name));
+    if (!relevant.length) { toast('분석 가능한 파일(package.json·requirements.txt·Dockerfile 등)이 없습니다.', true); return; }
+    const loaded = await Promise.all(relevant.map(async (f) => ({ filename: f.webkitRelativePath || f.name, content: await f.text().catch(() => '') })));
+    setProjectFiles(loaded.filter((f) => f.content));
+    const root = (relevant[0].webkitRelativePath || '').split('/')[0] || '프로젝트';
+    setProjectName(root);
+    toast(`${loaded.length}개 파일 인식 (총 ${all.length}개 중 관련 파일만)`);
+  };
+
+  const onMultiFile = async (e) => {
+    const all = Array.from(e.target.files || []);
+    const loaded = await Promise.all(all.map(async (f) => ({ filename: f.name, content: await f.text().catch(() => '') })));
+    setProjectFiles((prev) => {
+      const map = new Map(prev.map((p) => [p.filename, p]));
+      loaded.forEach((l) => map.set(l.filename, l));
+      return [...map.values()];
+    });
+    toast(`파일 ${loaded.length}개 추가됨`);
+  };
+
+  const removeFile = (fn) => setProjectFiles((prev) => prev.filter((f) => f.filename !== fn));
+
+  const scanProject = async () => {
+    // 텍스트 붙여넣기도 포함
+    const files = [...projectFiles];
+    if (content.trim()) files.push({ filename: filename || 'manifest', content });
+    if (!files.length) return toast('폴더를 선택하거나 파일 내용을 붙여넣으세요.', true);
+    setBusy(true); setFileJob(null); setFileMeta(null);
+    const r = await api('POST', '/api/quick/sbom/project', { projectName: projectName || undefined, files });
     setBusy(false);
-    if (r.status === 201) { setFileJob(r.json.job); setFileMeta({ format: r.json.format, count: r.json.componentCount }); toast(`분석 완료 (${r.json.format})`); }
-    else toast(r.json?.message || '분석 실패', true);
+    if (r.status === 201) {
+      setFileJob(r.json.job);
+      setFileMeta({ fileResults: r.json.fileResults, totalFindings: r.json.totalFindings });
+      toast(`프로젝트 분석 완료 — ${files.length}개 파일, ${r.json.totalFindings}건 발견`);
+    } else toast(r.json?.message || '분석 실패', true);
   };
 
   // 도메인/URL
@@ -948,7 +981,7 @@ function Quick({ user, toast, onOpenReport }) {
 
       <div class="seg">
         <button class=${tab === 'domain' ? 'on' : ''} onClick=${() => setTab('domain')}>🔗 도메인 · URL</button>
-        <button class=${tab === 'file' ? 'on' : ''} onClick=${() => setTab('file')}>📦 소프트웨어 파일</button>
+        <button class=${tab === 'file' ? 'on' : ''} onClick=${() => setTab('file')}>📂 소프트웨어 프로젝트</button>
       </div>
 
       ${tab === 'domain' && html`
@@ -981,26 +1014,53 @@ function Quick({ user, toast, onOpenReport }) {
 
       ${tab === 'file' && html`
         <div class="filebox">
-          <label class="dropzone" style=${{ display: 'block' }}>
-            <input type="file" style=${{ display: 'none' }} onChange=${onFile} />
-            📄 의존성 파일 선택 ${filename ? html`— <b>${filename}</b>` : ''}<br/>
-            <span style=${{ fontSize: 12 }}>package.json · requirements.txt · pom.xml · go.mod · CycloneDX SBOM</span>
-          </label>
-          <label>또는 내용 붙여넣기</label>
-          <textarea rows="7" class="mono" value=${content} placeholder=${'{\n  "dependencies": {\n    "lodash": "4.17.20",\n    "axios": "0.21.1"\n  }\n}'} onChange=${(e) => setContent(e.target.value)}></textarea>
-          <div style=${{ marginTop: 12, textAlign: 'center' }}><button class="primary" onClick=${scanFile} disabled=${busy}>${busy ? '분석 중…' : '취약점 분석'}</button></div>
-          ${busy && html`<div class="progress-wrap"><div class="progress indet"><i></i></div><div class="progress-meta"><span>구성요소 분석 중…</span><span></span></div></div>`}
-          <div class="muted" style=${{ marginTop: 8, fontSize: 12, textAlign: 'center' }}>원격 대상에 트래픽을 전혀 보내지 않는 정적 분석 — 권한 절차가 필요 없습니다.</div>
+          <div class="proj-upload">
+            <label class="proj-btn primary-upload">
+              <input type="file" style=${{ display:'none' }} webkitdirectory="" onChange=${onFolderSelect} />
+              📂 프로젝트 폴더 선택
+            </label>
+            <label class="proj-btn">
+              <input type="file" style=${{ display:'none' }} multiple onChange=${onMultiFile} />
+              ➕ 파일 추가
+            </label>
+            <div class="muted" style=${{ fontSize:12, alignSelf:'center' }}>package.json · *.lock · requirements.txt · Dockerfile · *.yml ···</div>
+          </div>
+
+          ${projectFiles.length > 0 && html`<div class="file-list">
+            <div class="file-list-head">인식된 파일 <span class="muted">(${projectFiles.length}개)</span></div>
+            ${projectFiles.map((f) => html`<div key=${f.filename} class="file-list-item">
+              <span class="mono">${f.filename.replace(/^[^/]+\//, '')}</span>
+              <button class="file-rm" onClick=${() => removeFile(f.filename)} title="제거">✕</button>
+            </div>`)}
+          </div>`}
+
+          <div class="proj-sep"><span>또는 파일 내용 직접 붙여넣기</span></div>
+          <textarea rows="5" class="mono" value=${content} placeholder=${'# 예) package.json, requirements.txt 내용을 여기에 붙여넣기\n{\n  "dependencies": { "lodash": "4.17.20" }\n}'} onChange=${(e) => setContent(e.target.value)}></textarea>
+          <div style=${{ marginTop: 12, textAlign: 'center' }}>
+            <button class="primary" onClick=${scanProject} disabled=${busy} style=${{ minWidth: 160 }}>
+              ${busy ? '분석 중…' : (projectFiles.length > 0 ? `프로젝트 분석 (${projectFiles.length}개 파일)` : '분석 시작')}
+            </button>
+          </div>
+          ${busy && html`<div class="progress-wrap"><div class="progress indet"><i></i></div><div class="progress-meta"><span>전체 파일 분석 중…</span><span></span></div></div>`}
+          <div class="muted" style=${{ marginTop: 8, fontSize: 12, textAlign: 'center' }}>원격 트래픽 없음 · 권한 절차 불필요 · 모든 생태계(npm·PyPI·Maven·Cargo·Go·Ruby·PHP·.NET) 동시 분석</div>
         </div>`}
 
       ${tab === 'file' && fileJob && html`<div class="panel result-card">
         <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-          <div><b>분석 결과</b> <span class="muted">· ${fileMeta?.format} · 구성요소 ${fileMeta?.count}개 · 취약 ${fileJob.findings.length}건</span></div>
+          <div><b>프로젝트 분석 결과</b> <span class="muted">· ${fileMeta?.fileResults?.length || 0}개 파일 · ${fileJob.findings.length}건 발견</span></div>
           <div style=${{ display: 'flex', gap: 8 }}>
-            <${FixPromptButton} findings=${fileJob.findings} target=${filename || 'software'} />
+            <${FixPromptButton} findings=${fileJob.findings} target=${projectName || 'project'} />
             <button onClick=${() => onOpenReport(fileJob.id)}>전체 리포트 →</button>
           </div>
         </div>
+        ${fileMeta?.fileResults?.length > 0 && html`<div class="file-breakdown">
+          ${fileMeta.fileResults.filter((r) => r.findingCount > 0 || r.componentCount > 0).map((r) => html`<div key=${r.filename} class="file-br-row">
+            <span class="mono">${r.filename.replace(/^[^/]+\//, '')}</span>
+            <span class="pill">${r.format}</span>
+            ${r.componentCount > 0 && html`<span class="muted">${r.componentCount}개 구성요소</span>`}
+            ${r.findingCount > 0 && html`<span class="badge sev-high">${r.findingCount}건</span>`}
+          </div>`)}
+        </div>`}
         <div style=${{ margin: '12px 0' }}><${ScoreBadge} findings=${fileJob.findings} /></div>
         <${FindingsPanel} findings=${fileJob.findings} />
       </div>`}

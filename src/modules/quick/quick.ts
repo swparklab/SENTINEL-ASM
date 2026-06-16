@@ -15,6 +15,60 @@ import { mapCompliance } from '../compliance/mapping.js';
 import { orchestrator } from '../orchestrator/orchestrator.js';
 import { STANDARD_PORTS } from '../scanners/types.js';
 
+/**
+ * 프로젝트 폴더(여러 파일) 통합 정적 분석.
+ * 단일 파일 분석의 한계(단일 생태계만 커버)를 넘어, 폴더 내
+ * 모든 매니페스트·Dockerfile·IaC·CI 파일을 한 번에 처리하고
+ * 발견을 통합·중복 제거하여 단일 작업으로 기록한다.
+ */
+export function scanSoftwareProject(
+  tenantId: string, actor: string,
+  files: { filename: string; content: string }[],
+  projectName?: string,
+): { job: ScanJob; fileResults: { filename: string; format: string; componentCount: number; findingCount: number }[]; totalFindings: number } {
+  const fileResults: { filename: string; format: string; componentCount: number; findingCount: number }[] = [];
+  const allFindings: ReturnType<typeof matchSbom> = [];
+  const seenKeys = new Set<string>();
+
+  for (const { filename, content } of files) {
+    const { components, format } = parseManifest(filename, content);
+    const fFindings = [...matchSbom(components), ...staticFileAudit(filename, content)];
+    fileResults.push({ filename, format, componentCount: components.length, findingCount: fFindings.length });
+    // 발견 중복 제거: module:title:target 으로 동일 취약점 합산
+    for (const f of fFindings) {
+      const key = `${f.module}:${f.title}:${f.target}`;
+      if (!seenKeys.has(key)) { seenKeys.add(key); allFindings.push(f); }
+    }
+  }
+
+  const formats = [...new Set(fileResults.map((r) => r.format).filter((f) => f !== '미인식'))];
+  const totalComponents = fileResults.reduce((s, r) => s + r.componentCount, 0);
+  const label = projectName || `프로젝트 (${files.length}개 파일)`;
+
+  const asset: Asset = {
+    id: id('ast'), tenantId, type: 'software', value: label,
+    label: `프로젝트 분석 (${formats.join('·') || '혼합'}, ${totalComponents}개 구성요소, ${files.length}개 파일)`,
+    businessCriticality: 'high', ownership: null, createdAt: now(), createdBy: actor,
+  };
+  repos.assets.insert(asset);
+
+  const findings = mapCompliance(prioritize(allFindings, asset));
+  const job: ScanJob = {
+    id: id('job'), tenantId, assetId: asset.id, consentId: '',
+    modules: ['cve'], intensity: 'passive', status: 'completed',
+    gateDecision: { allowed: true, reason: 'SBOM 프로젝트 정적 분석 — 원격 대상 없음', checkedAt: now() },
+    requestedBy: actor, queuedAt: now(), startedAt: now(), finishedAt: now(),
+    findings, egressAllowlist: [],
+  };
+  repos.scanJobs.insert(job);
+  audit({
+    tenantId, actor, action: 'quick.sbom.project', target: label, outcome: 'info',
+    reason: `${files.length}개 파일, 구성요소 ${totalComponents}개, 취약 ${findings.length}건`,
+    meta: { jobId: job.id, files: files.length },
+  });
+  return { job, fileResults, totalFindings: findings.length };
+}
+
 /** 소프트웨어 파일을 정적 분석하여 완료된 점검 작업으로 기록하고 반환. */
 export function scanSoftware(tenantId: string, actor: string, filename: string, content: string): {
   job: ScanJob; format: string; componentCount: number;
