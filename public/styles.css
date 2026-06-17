@@ -88,6 +88,49 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px
 .seg button:hover { background: transparent; }
 .seg button.on:hover { background: #fff; }
 
+/* ───────── 용어 사전 팝업 ───────── */
+.glossary-tag { cursor: help; border-bottom: 1px dashed var(--accent); color: inherit; }
+.glossary-q { font-size: 10px; color: var(--accent); font-weight: 700; vertical-align: super; margin-left: 2px; }
+.glossary-pop { position: absolute; left: 0; top: calc(100% + 4px); z-index: 100; width: min(320px, 90vw); background: #11192b; color: #eef2fb; border-radius: 12px; padding: 14px 16px; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+.glossary-title { font-weight: 700; font-size: 13px; margin-bottom: 6px; color: #fff; }
+.glossary-desc { font-size: 12.5px; line-height: 1.6; }
+.glossary-close { margin-top: 10px; background: rgba(255,255,255,.1); border: none; color: #eef2fb; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+
+/* ───────── 온보딩 배너 ───────── */
+.onboard { background: linear-gradient(135deg, var(--accent-soft) 0%, #f0f4ff 100%); border: 1.5px solid var(--accent); border-radius: 16px; padding: 22px 24px; margin-bottom: 20px; }
+.onboard-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
+.onboard-title { font-size: 17px; font-weight: 700; color: var(--text); }
+.onboard-sub { font-size: 13px; color: var(--muted); margin-top: 3px; }
+.onboard-close { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 18px; padding: 0; }
+.onboard-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 16px; }
+@media (max-width: 600px) { .onboard-steps { grid-template-columns: 1fr; } }
+.onboard-step { display: flex; gap: 12px; align-items: flex-start; background: #fff; border-radius: 12px; padding: 14px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+.onboard-num { width: 28px; height: 28px; min-width: 28px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 800; font-size: 14px; display: grid; place-items: center; }
+.onboard-step-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.onboard-step-desc { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.onboard-tip { background: #fff; border-radius: 10px; padding: 10px 14px; font-size: 13px; color: var(--text); border-left: 3px solid var(--accent); }
+
+/* ───────── 액션 카드 (결과 후 다음 단계) ───────── */
+.action-card { border-radius: 14px; padding: 18px 20px; margin-bottom: 16px; border: 2px solid; }
+.action-card.urgent { background: #fff8f8; border-color: var(--crit); }
+.action-card.ok { background: #f0fdf4; border-color: var(--low); }
+.action-card-title { font-size: 16px; font-weight: 800; margin-bottom: 14px; }
+.action-steps { display: flex; flex-direction: column; gap: 12px; }
+.action-step { display: flex; gap: 12px; align-items: flex-start; }
+.action-step-num { min-width: 52px; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; text-align: center; }
+.action-step.crit .action-step-num { background: #fee2e2; color: var(--crit); }
+.action-step.high .action-step-num { background: #ffedd5; color: var(--high); }
+.action-step.med .action-step-num  { background: #fef9c3; color: #a16207; }
+.action-step.next .action-step-num { background: var(--accent-soft); color: var(--accent); }
+.action-step-list { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* ───────── 발견사항 접이식 (모바일 대응) ───────── */
+.finding-collapsible .finding-body { display: none; }
+.finding-collapsible.open .finding-body { display: block; }
+.finding-toggle { cursor: pointer; }
+.finding-toggle .toggle-icon { transition: transform .2s; display: inline-block; }
+.finding-collapsible.open .toggle-icon { transform: rotate(90deg); }
+
 /* ───────── 도메인 정규화 힌트 ───────── */
 .norm-hint { max-width: 620px; margin: 6px auto 0; text-align: left; font-size: 13px; padding: 6px 12px; border-radius: 8px; background: var(--bg-soft); border: 1px solid var(--line); display: flex; align-items: center; gap: 6px; }
 .norm-arrow { color: var(--accent); font-weight: 700; font-size: 15px; }

@@ -28,6 +28,125 @@ const SEV_KO = { critical: '치명적', high: '심각', medium: '주의', low: '
 const SEV_COLOR = { critical: '#dc2626', high: '#ea580c', medium: '#ca8a04', low: '#16a34a', info: '#2563eb' };
 const fmt = (iso) => iso ? new Date(iso).toLocaleString('ko-KR', { hour12: false }) : '-';
 const Sev = ({ s }) => html`<span class=${`badge sev-${s}`}>${SEV_KO[s] || s.toUpperCase()}</span>`;
+
+// ───────── 용어 사전 (비전공자용 클릭 팝업) ─────────
+const GLOSSARY = {
+  CVE: { title: 'CVE (공개 취약점 번호)', desc: '전 세계 보안 전문가들이 공식 등록한 소프트웨어 결함 목록입니다. "CVE-2021-44228(Log4Shell)"처럼 번호로 관리됩니다. CVE 번호가 있다는 건 이미 해커들도 이 취약점을 알고 있다는 뜻입니다.' },
+  CVSS: { title: 'CVSS (취약점 위험 점수)', desc: '취약점의 위험도를 0~10점으로 표시한 국제 표준 점수입니다. 7점 이상이면 심각, 9점 이상이면 치명적으로 분류됩니다.' },
+  EPSS: { title: 'EPSS (실제 악용 가능성)', desc: '이 취약점이 향후 30일 안에 실제 사이버 공격에 사용될 확률입니다. 80%라면 10개 중 8개 공격에서 이 방법을 쓴다는 뜻입니다.' },
+  KEV: { title: 'KEV (실제 악용 확인됨)', desc: '미국 사이버보안청(CISA)이 "이 취약점은 지금 실제 공격에 쓰이고 있다"고 공식 확인한 목록입니다. KEV 표시가 있으면 즉시 조치가 필요합니다.' },
+  OWASP: { title: 'OWASP Top 10', desc: '전 세계 웹 보안 전문가 단체(OWASP)가 선정한 가장 위험한 웹 보안 문제 10가지입니다. 국제 보안 감사의 기준으로 사용됩니다.' },
+  CWE: { title: 'CWE (소프트웨어 결함 분류)', desc: '코드에 생길 수 있는 보안 결함의 종류를 분류한 국제 표준 목록입니다. "CWE-89(SQL 인젝션)"처럼 번호와 이름으로 관리됩니다.' },
+  TLS: { title: 'TLS/HTTPS (암호화 통신)', desc: '인터넷에서 데이터를 암호화해서 전송하는 기술입니다. 브라우저 주소창의 자물쇠(🔒)가 이것입니다. TLS 1.0/1.1은 구버전으로 보안 취약, 1.2 이상을 써야 합니다.' },
+  HSTS: { title: 'HSTS (HTTPS 강제 설정)', desc: '브라우저에게 "이 사이트는 반드시 HTTPS로만 접속하라"고 알려주는 설정입니다. 없으면 평문 HTTP로 연결되어 도청 위험이 있습니다.' },
+  CSP: { title: 'CSP (악성 스크립트 차단)', desc: '웹사이트에서 실행할 수 있는 스크립트의 출처를 제한하는 보안 설정입니다. 이게 없으면 해커가 악성 코드를 삽입해도 브라우저가 막지 못합니다.' },
+  CORS: { title: 'CORS (다른 사이트 접근 제어)', desc: '다른 웹사이트에서 내 사이트 데이터에 접근하는 것을 제어하는 설정입니다. 잘못 설정하면 공격자 사이트에서 로그인된 내 계정으로 데이터를 빼갈 수 있습니다.' },
+  SPF: { title: 'SPF (이메일 발신자 인증)', desc: '내 도메인(예: naver.com)에서 보낼 수 있는 메일 서버를 지정하는 설정입니다. 없으면 누구나 naver.com 주소로 위조 이메일을 보낼 수 있습니다.' },
+  DMARC: { title: 'DMARC (이메일 위조 차단)', desc: 'SPF·DKIM 인증에 실패한 이메일을 어떻게 처리할지 정하는 정책입니다. "p=reject"면 위조 이메일을 완전히 차단합니다.' },
+  DKIM: { title: 'DKIM (이메일 서명)', desc: '이메일에 디지털 서명을 달아 내용이 전송 중 변조되지 않았음을 증명하는 기술입니다.' },
+  ASM: { title: 'ASM (외부 공격표면 관리)', desc: '외부에서 내 시스템에 접근 가능한 모든 진입점(서브도메인, 열린 포트, 공개 파일 등)을 찾아 목록화하는 과정입니다.' },
+  DAST: { title: 'DAST (동적 웹 취약점 점검)', desc: '실제로 실행 중인 웹사이트에 안전한 테스트 요청을 보내 취약점을 찾는 방법입니다. 마치 윤리적 해커처럼 사이트를 두드려보는 것입니다.' },
+  SAST: { title: 'SAST (소스코드 정적 분석)', desc: '소스 코드를 실행하지 않고 분석해서 보안 결함(SQL인젝션, 하드코딩된 비밀번호 등)을 찾는 방법입니다.' },
+  SBOM: { title: 'SBOM (소프트웨어 부품 목록)', desc: '내 소프트웨어가 사용하는 외부 라이브러리·패키지 목록입니다. 어느 부품에 취약점이 있는지 파악하기 위해 필요합니다.' },
+  ISMS: { title: 'ISMS-P (정보보호 관리체계)', desc: '한국 정보보호 인증 기준입니다. 기업이 정보를 안전하게 관리하고 있는지 평가하는 국내 표준입니다.' },
+  PCI: { title: 'PCI-DSS (카드 결제 보안)', desc: '신용카드 결제를 처리하는 모든 기업이 지켜야 하는 국제 보안 기준입니다.' },
+  NIST: { title: 'NIST CSF (미국 국립 보안 프레임워크)', desc: '미국 국립표준기술연구소가 만든 사이버보안 관리 프레임워크입니다. 전 세계 기업이 보안 수준을 평가할 때 참고합니다.' },
+};
+
+function GlossaryTag({ term, children }) {
+  const [open, setOpen] = useState(false);
+  const info = GLOSSARY[term];
+  if (!info) return html`<span>${children || term}</span>`;
+  return html`
+    <span style=${{ position: 'relative', display: 'inline-block' }}>
+      <span class="glossary-tag" onClick=${(e) => { e.stopPropagation(); setOpen(!open); }}>
+        ${children || term} <span class="glossary-q">?</span>
+      </span>
+      ${open && html`<div class="glossary-pop" onClick=${(e) => e.stopPropagation()}>
+        <div class="glossary-title">${info.title}</div>
+        <div class="glossary-desc">${info.desc}</div>
+        <button class="glossary-close" onClick=${() => setOpen(false)}>닫기 ✕</button>
+      </div>`}
+    </span>`;
+}
+
+// ───────── 온보딩 가이드 (처음 사용자용) ─────────
+function OnboardingBanner({ onDismiss }) {
+  return html`
+    <div class="onboard">
+      <div class="onboard-header">
+        <div>
+          <div class="onboard-title">👋 처음 오셨나요? 3단계로 시작하세요</div>
+          <div class="onboard-sub">보안 전문가가 아니어도 괜찮습니다 — 입력만 하면 시스템이 알아서 분석합니다</div>
+        </div>
+        <button class="onboard-close" onClick=${onDismiss}>✕</button>
+      </div>
+      <div class="onboard-steps">
+        <div class="onboard-step">
+          <div class="onboard-num">1</div>
+          <div>
+            <div class="onboard-step-title">🌐 도메인 입력</div>
+            <div class="onboard-step-desc">내 웹사이트 주소(예: mycompany.com)를 넣으면 외부에서 보이는 보안 문제를 찾아드립니다</div>
+          </div>
+        </div>
+        <div class="onboard-step">
+          <div class="onboard-num">2</div>
+          <div>
+            <div class="onboard-step-title">📂 소프트웨어 분석</div>
+            <div class="onboard-step-desc">개발팀에서 package.json, requirements.txt 파일을 받아 업로드하면 알려진 보안 취약점을 찾습니다</div>
+          </div>
+        </div>
+        <div class="onboard-step">
+          <div class="onboard-num">3</div>
+          <div>
+            <div class="onboard-step-title">🤖 AI가 수정</div>
+            <div class="onboard-step-desc">결과 리포트를 AI 개발 도구(Cursor 등)에 붙여넣으면 자동으로 보안 코드를 수정합니다</div>
+          </div>
+        </div>
+      </div>
+      <div class="onboard-tip">💡 <b>지금 바로:</b> 상단 검색창에 도메인을 넣고 "점검 시작"을 누르세요!</div>
+    </div>`;
+}
+
+// ───────── 결과 액션 카드 (비전공자용 "그래서 뭘 해야 하나?") ─────────
+function ActionCard({ findings, onOpenReport }) {
+  if (!findings?.length) return null;
+  const crit = findings.filter(f => f.severity === 'critical');
+  const high = findings.filter(f => f.severity === 'high');
+  const med  = findings.filter(f => f.severity === 'medium');
+  const hasUrgent = crit.length > 0 || high.length > 0;
+
+  return html`<div class="action-card ${hasUrgent ? 'urgent' : 'ok'}">
+    <div class="action-card-title">
+      ${hasUrgent ? '🚨 지금 해야 할 일이 있습니다' : '✅ 심각한 문제는 없습니다'}
+    </div>
+    <div class="action-steps">
+      ${crit.length > 0 && html`<div class="action-step crit">
+        <span class="action-step-num">즉시</span>
+        <div><b>치명적 문제 ${crit.length}건</b> — 오늘 안에 해결하세요
+          <div class="action-step-list">${crit.slice(0,3).map(f=>html`<div key=${f.id}>• ${f.title.slice(0,55)}</div>`)}</div>
+        </div>
+      </div>`}
+      ${high.length > 0 && html`<div class="action-step high">
+        <span class="action-step-num">1주일</span>
+        <div><b>심각 문제 ${high.length}건</b> — 이번 주 안에 개발팀에 전달하세요
+          <div class="action-step-list">${high.slice(0,3).map(f=>html`<div key=${f.id}>• ${f.title.slice(0,55)}</div>`)}</div>
+        </div>
+      </div>`}
+      ${med.length > 0 && html`<div class="action-step med">
+        <span class="action-step-num">1개월</span>
+        <div><b>주의 문제 ${med.length}건</b> — 다음 업데이트 때 반영하세요</div>
+      </div>`}
+      <div class="action-step next">
+        <span class="action-step-num">다음</span>
+        <div>
+          <b>AI 자동 수정하기</b> — "AI 수정 명령서" 버튼을 눌러 파일을 다운받고,
+          Cursor나 GitHub Copilot에 붙여넣으면 개발 AI가 코드를 직접 수정합니다
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
 const Status = ({ s }) => html`<span class=${`st-${s}`}>${s}</span>`;
 
 function useToast() {
@@ -355,7 +474,8 @@ function Report({ jobId, onBack }) {
       ${r.coverage?.length && html`<div class="muted" style=${{ marginTop: 8, fontSize: 12 }}>범위: ${r.coverage.join(' · ')}</div>`}
     </div>
     ${r.categories && (Object.keys(r.categories.owasp).length > 0) && html`<div class="panel">
-      <h3>표준 커버리지 (OWASP Top 10 · CWE)</h3>
+      <h3>표준 커버리지 — <${GlossaryTag} term="OWASP">OWASP Top 10<//> · <${GlossaryTag} term="CWE">CWE<//></h3>
+      <div class="muted" style=${{ fontSize: 12, marginBottom: 8 }}>발견된 취약점이 국제 보안 표준의 어느 항목에 해당하는지 분류한 것입니다.</div>
       <div style=${{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         ${Object.entries(r.categories.owasp).map(([k, n]) => html`<span key=${k} class="pill">${k} · ${n}건</span>`)}
       </div>
@@ -384,17 +504,17 @@ function Report({ jobId, onBack }) {
         <div style=${{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <${Sev} s=${f.severity} /><b>${f.title}</b>
           <span class="pill">위험 ${f.riskScore}</span>
-          ${f.owasp && html`<span class="pill">${f.owasp.split(' ')[0]}</span>`}
-          ${f.cwe && html`<span class="pill">${f.cwe}</span>`}
-          ${f.cve && html`<span class="pill">${f.cve}</span>`}
-          ${f.kev && html`<span class="badge sev-critical">KEV</span>`}
-          ${typeof f.epss === 'number' && html`<span class="pill">EPSS ${(f.epss * 100).toFixed(0)}%</span>`}
+          ${f.owasp && html`<${GlossaryTag} term="OWASP"><span class="pill">${f.owasp.split(' ')[0]}</span><//>`}
+          ${f.cwe && html`<${GlossaryTag} term="CWE"><span class="pill">${f.cwe}</span><//>`}
+          ${f.cve && html`<${GlossaryTag} term="CVE"><span class="pill">${f.cve}</span><//>`}
+          ${f.kev && html`<${GlossaryTag} term="KEV"><span class="badge sev-critical">KEV ⚠</span><//>`}
+          ${typeof f.epss === 'number' && html`<${GlossaryTag} term="EPSS"><span class="pill">악용 확률 ${(f.epss * 100).toFixed(0)}%</span><//>`}
         </div>
         <div class="muted" style=${{ margin: '6px 0' }}>${f.description}</div>
-        <div class="mono muted">대상: ${f.target}</div>
+        <div class="mono muted" style=${{ fontSize: 12 }}>📍 위치: ${f.target}</div>
         ${f.evidence && html`<pre class="evidence">${f.evidence}</pre>`}
-        ${f.remediation && html`<div style=${{ marginTop: 4 }}>🔧 ${f.remediation}</div>`}
-        ${f.compliance?.length && html`<div class="muted" style=${{ marginTop: 4, fontSize: 11 }}>${f.compliance.map((m) => `${m.framework} ${m.control}`).join(' · ')}</div>`}
+        ${f.remediation && html`<div style=${{ marginTop: 6, padding: '8px 10px', background:'var(--bg-soft)', borderRadius:8, fontSize:13 }}>🔧 <b>해결 방법</b> ${f.remediation}</div>`}
+        ${f.compliance?.length && html`<div class="muted" style=${{ marginTop: 6, fontSize: 11 }}>📋 관련 규정: ${f.compliance.map((m) => `${m.framework} ${m.control}`).join(' · ')}</div>`}
       </div>`)}
       ${!r.technical.length && html`<div class="muted">발견 항목 없음</div>`}
     </div>`;
@@ -685,6 +805,17 @@ function FixPromptButton({ findings, target }) {
   if (!findings?.length) return null;
   const fn = `sentinel-fix-${String(target || 'scan').replace(/[^\w.-]/g, '_').slice(0, 40)}.md`;
   return html`<button class="primary" onClick=${() => downloadMd(fn, buildFixPrompt(findings, target))} title="AI에게 그대로 붙여넣어 코드를 수정시키는 명령서">🤖 AI 수정 명령서 (.md)</button>`;
+}
+
+// 게이트 차단 메시지를 비전공자가 이해할 수 있게 변환
+function friendlyGateReason(raw) {
+  if (!raw) return '';
+  if (raw.includes('소유권')) return '이 사이트의 소유자임을 먼저 확인해야 합니다. → 자산 메뉴에서 소유권을 검증하세요.';
+  if (raw.includes('동의') || raw.includes('consent')) return '이 사이트를 점검해도 된다는 사전 동의가 없습니다. → 동의·범위 메뉴에서 등록하세요.';
+  if (raw.includes('범위') || raw.includes('scope')) return '이 주소는 허용된 점검 범위를 벗어났습니다. → 동의·범위에서 허용 대상을 추가하세요.';
+  if (raw.includes('윈도우') || raw.includes('window')) return '점검 허용 시간이 아닙니다. → 동의·범위에서 허용 시간 범위를 확인하세요.';
+  if (raw.includes('강도') || raw.includes('intensity')) return '요청한 점검 강도가 허용 범위를 초과했습니다.';
+  return raw;
 }
 
 // ───────────────────────── 발견사항 목록 (공용) ─────────────────────────
@@ -1158,6 +1289,7 @@ function Quick({ user, toast, onOpenReport }) {
           </div>`)}
         </div>`}
         <div style=${{ margin: '12px 0' }}><${ScoreBadge} findings=${fileJob.findings} /></div>
+        <${ActionCard} findings=${fileJob.findings} />
         <${FindingsPanel} findings=${fileJob.findings} />
       </div>`}
 
@@ -1192,8 +1324,12 @@ function Quick({ user, toast, onOpenReport }) {
             </div>
           </div>
           <div style=${{ margin: '12px 0' }}><${ScoreBadge} findings=${domainJob.findings} /></div>
+          <${ActionCard} findings=${domainJob.findings} onOpenReport=${() => onOpenReport(domainJob.id)} />
           <${FindingsPanel} findings=${domainJob.findings} />`
-        : html`<div class=${domainJob.status === 'rejected' ? 'no' : 'muted'}>상태: ${domainJob.status} ${domainJob.gateDecision?.reason ? '— ' + domainJob.gateDecision.reason : ''}</div>`}
+        : html`<div class=${domainJob.status === 'rejected' ? 'no' : 'muted'}>
+            ${domainJob.status === 'rejected' ? '🚫 이 대상은 점검할 수 없습니다.' : ''}
+            ${domainJob.gateDecision?.reason ? html`<div class="muted" style=${{ marginTop: 4, fontSize: 13 }}>${friendlyGateReason(domainJob.gateDecision.reason)}</div>` : ''}
+          </div>`}
       </div>`}
 
       ${tab === 'sast' && html`
@@ -1302,15 +1438,15 @@ function Quick({ user, toast, onOpenReport }) {
 }
 
 const COVERAGE_CARDS = [
-  { ic: '🌐', t: '공격표면관리 (ASM)', d: '서브도메인 열거 · 오픈 포트/서비스 핑거프린팅 · Shadow IT 식별' },
-  { ic: '📧', t: '이메일·DNS 보안', d: 'SPF · DMARC · DKIM · CAA · MX 스푸핑 방지 자세 점검' },
-  { ic: '🔐', t: '전송계층 (TLS)', d: 'TLS 버전(1.0/1.1 차단) · 인증서 만료/체인 검증' },
-  { ic: '🧱', t: '보안 헤더·구성', d: 'HSTS · CSP · XFO · COOP/COEP/CORP · Permissions-Policy' },
-  { ic: '🔁', t: 'CORS·HTTP 메서드', d: 'CORS 오구성(와일드카드+credentials) · TRACE/PUT 등 위험 메서드' },
-  { ic: '🍪', t: '쿠키·세션', d: 'Secure · HttpOnly · SameSite 플래그 심층 분석' },
-  { ic: '📂', t: '민감 정보 노출', d: '.env · .git · Actuator · 백업/키 파일 (콘텐츠 검증 · 오탐 제거)' },
-  { ic: '📦', t: 'SBOM·CVE', d: 'npm·PyPI·Maven 구성요소 대조 · EPSS/KEV 가중 우선순위' },
-  { ic: '📊', t: '위험·컴플라이언스', d: 'CVSS×중요도×노출 산정 · 8개 표준 자동 증빙 · 조치 로드맵' },
+  { ic: '🌐', t: '외부 노출 자산 탐색', d: '숨겨진 서브도메인·열린 포트·관리되지 않는 서버를 외부에서 찾아냅니다' },
+  { ic: '📧', t: '이메일 위조 방지 설정', d: '내 도메인 명의로 위조 이메일을 보낼 수 없도록 SPF·DMARC·DKIM 설정을 점검합니다' },
+  { ic: '🔐', t: 'HTTPS 암호화 통신', d: '최신 암호화 방식을 쓰는지, 인증서 만료 여부, 약한 암호 사용 여부를 점검합니다' },
+  { ic: '🧱', t: '브라우저 보안 설정', d: '악성 스크립트 차단(CSP)·도청 방지(HSTS)·클릭재킹 방지 등 브라우저 보호 설정을 점검합니다' },
+  { ic: '🔁', t: '데이터 접근 제어', d: '다른 사이트에서 내 데이터에 무단 접근하는 것을 막는 CORS 설정을 점검합니다' },
+  { ic: '🍪', t: '로그인 세션 보안', d: '세션 쿠키가 탈취·도용되지 않도록 보안 속성이 올바르게 설정되었는지 점검합니다' },
+  { ic: '📂', t: '유출 파일 탐지', d: '설정 파일(.env)·소스코드(.git)·백업 파일 등이 외부에 노출되지 않았는지 점검합니다' },
+  { ic: '📦', t: '소프트웨어 취약점', d: '사용 중인 라이브러리·패키지에 알려진 보안 결함이 있는지 11개 언어 생태계에서 점검합니다' },
+  { ic: '📊', t: '위험도 측정 & 법적 기준', d: '발견된 문제를 위험도 순으로 정렬하고, ISMS-P·개인정보보호법·PCI-DSS 등 8개 규정에 매핑합니다' },
 ];
 
 const NAV = [
@@ -1323,6 +1459,7 @@ const NAV = [
 ];
 
 function App() {
+  const [showOnboard, setShowOnboard] = useState(() => !localStorage.getItem('sentinel_onboard_done'));
   const [user, setUser] = useState(null);
   const [route, setRoute] = useState(location.hash || '#/');
   const [reportJob, setReportJob] = useState(null);
@@ -1376,7 +1513,12 @@ function App() {
         </div>
       </header>
       ${isHero
-        ? html`<div class="container" style=${{ paddingTop: 0 }}>${page}</div>`
+        ? html`<div class="container" style=${{ paddingTop: 0 }}>
+            ${showOnboard && html`<div style=${{ padding: '20px 0 0' }}>
+              <${OnboardingBanner} onDismiss=${() => { localStorage.setItem('sentinel_onboard_done','1'); setShowOnboard(false); }} />
+            </div>`}
+            ${page}
+          </div>`
         : html`<div class="container">
             <div class="page-title">${title}</div>
             ${page}
