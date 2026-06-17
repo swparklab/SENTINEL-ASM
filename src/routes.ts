@@ -238,7 +238,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const v = validate(z.object({ domain: z.string().min(1) }), req.body);
       if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
       const result = await checkHibpDomain(v.data.domain);
-      audit({ tenantId: req.auth!.tenantId, actor: req.auth!.email, action: 'quick.threatintel', target: v.data.domain, outcome: 'info', reason: result.breached ? `유출 ${result.count}건` : '유출 없음' });
+      audit({ tenantId: req.auth!.tenantId, actor: req.auth!.email, action: 'quick.threatintel', target: v.data.domain, outcome: 'info', reason: result.breached ? `침해 사고 ${result.count}건, 유출 계정 ${result.totalPwned?.toLocaleString()}개` : '침해 이력 없음' });
       return reply.code(200).send({ domain: v.data.domain, ...result });
     });
 

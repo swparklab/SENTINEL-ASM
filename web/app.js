@@ -1252,13 +1252,39 @@ function Quick({ user, toast, onOpenReport }) {
             <input value=${intelDomain} placeholder="example.com" onChange=${e=>setIntelDomain(e.target.value)} onKeyDown=${e=>e.key==='Enter'&&checkIntel()} />
             <button class="primary" onClick=${checkIntel} disabled=${intelBusy}>${intelBusy ? '조회 중…' : '유출 조회'}</button>
           </div>
-          ${intelResult && html`<div class="panel" style=${{ marginTop:14 }}>
+          ${intelResult && html`<div style=${{ marginTop:14 }}>
             ${intelResult.breached
-              ? html`<div class="no" style=${{ fontWeight:700, marginBottom:8 }}>⚠ 유출 이력 ${intelResult.count}건 확인됨</div>
-                     <div class="muted">관련 침해 사고: ${(intelResult.names || []).join(', ')}</div>
-                     <div style=${{ marginTop:8 }}>이 도메인의 이메일 계정이 ${intelResult.count}건의 데이터 침해 사고에 포함되었습니다. 해당 계정의 비밀번호 즉시 변경과 MFA 적용을 권고합니다.</div>`
-              : html`<div class="ok" style=${{ fontWeight:700 }}>✅ 유출 이력 없음</div>
-                     <div class="muted" style=${{ marginTop:6 }}>공개 데이터 침해 사고에서 이 도메인의 이메일 계정이 발견되지 않았습니다.</div>`}
+              ? html`<div class="panel" style=${{ borderLeft:'4px solid var(--crit)' }}>
+                  <div class="no" style=${{ fontWeight:700, fontSize:16, marginBottom:8 }}>
+                    ⚠ 데이터 침해 사고 ${intelResult.count}건 확인
+                  </div>
+                  <div style=${{ marginBottom:12 }}>
+                    <b>${intelResult.domain}</b> 에서 총 <b>${(intelResult.totalPwned||0).toLocaleString()}</b>개 계정이
+                    공개 데이터 침해에 포함된 것으로 확인됩니다.
+                  </div>
+                  ${(intelResult.breaches||[]).map((b) => html`
+                    <div key=${b.Name} style=${{ borderBottom:'1px solid var(--line)', padding:'10px 0', marginBottom:8 }}>
+                      <div style=${{ display:'flex', gap:10, flexWrap:'wrap', alignItems:'center', marginBottom:4 }}>
+                        <b>${b.Title}</b>
+                        <span class="pill">${b.BreachDate}</span>
+                        <span class="badge sev-critical">${(b.PwnCount||0).toLocaleString()} 계정</span>
+                        ${!b.IsVerified && html`<span class="pill">미검증</span>`}
+                      </div>
+                      <div class="muted" style=${{ fontSize:12 }}>유출 정보: ${(b.DataClasses||[]).slice(0,5).join(', ')}</div>
+                    </div>
+                  `)}
+                  <div style=${{ marginTop:8, padding:'10px', background:'var(--bg-soft)', borderRadius:8, fontSize:13 }}>
+                    🔧 <b>권고 조치</b>: 해당 도메인 사용자 전원에게 비밀번호 즉시 변경 안내,
+                    MFA 강제 적용, 유출된 데이터 유형에 따라 추가 보호 조치(카드 재발급 등)를 시행하십시오.
+                  </div>
+                </div>`
+              : html`<div class="panel" style=${{ borderLeft:'4px solid var(--low)' }}>
+                  <div class="ok" style=${{ fontWeight:700, fontSize:15 }}>✅ 공개 침해 이력 없음</div>
+                  <div class="muted" style=${{ marginTop:6 }}>
+                    HIBP(Have I Been Pwned) 공개 데이터베이스에 <b>${intelResult.domain}</b> 의 침해 사고 기록이 없습니다.
+                    단, 비공개·미공개 침해는 포함되지 않을 수 있습니다.
+                  </div>
+                </div>`}
           </div>`}
         </div>
       `}

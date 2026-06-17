@@ -88,20 +88,51 @@ async function probeDockerRegistry(guard: EgressGuard, host: string): Promise<Fi
   return findings;
 }
 
-/** 위협 인텔: HIBP(Have I Been Pwned) 도메인 유출 확인 — 무료 공개 API. */
-export async function checkHibpDomain(domain: string): Promise<{ breached: boolean; count: number; names: string[] }> {
+export interface HibpBreach {
+  Name: string;
+  Title: string;
+  BreachDate: string;
+  PwnCount: number;
+  DataClasses: string[];
+  Description: string;
+  IsVerified: boolean;
+}
+
+/**
+ * HIBP 도메인 침해 확인 — GET /api/v3/breaches?domain={domain} (무료, 인증 불필요).
+ * 해당 도메인에서 발생한 공식 확인된 데이터 침해 사고를 조회한다.
+ * (참고: 개별 이메일 계정 조회는 API key 필요 — 여기서는 도메인 전체 침해만)
+ */
+export async function checkHibpDomain(domain: string): Promise<{
+  breached: boolean; count: number; totalPwned: number;
+  names: string[]; breaches: HibpBreach[];
+}> {
+  const empty = { breached: false, count: 0, totalPwned: 0, names: [], breaches: [] };
   try {
-    const res = await fetch(`https://haveibeenpwned.com/api/v3/breachesforaccount/${encodeURIComponent(domain)}`, {
-      signal: AbortSignal.timeout(8000),
-      headers: { 'user-agent': 'SENTINEL-ASM/1.0 (+authorized-security-research)', 'hibp-api-key': '' },
-    });
-    if (res.status === 404) return { breached: false, count: 0, names: [] };
-    if (res.status === 401 || res.status === 403) return { breached: false, count: 0, names: [] }; // API key 필요
-    if (!res.ok) return { breached: false, count: 0, names: [] };
-    const data = await res.json() as { Name: string }[];
-    return { breached: data.length > 0, count: data.length, names: data.map(d => d.Name).slice(0, 5) };
-  } catch {
-    return { breached: false, count: 0, names: [] };
+    const res = await fetch(
+      `https://haveibeenpwned.com/api/v3/breaches?domain=${encodeURIComponent(domain)}`,
+      {
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          'user-agent': 'SENTINEL-ASM/1.0 (+authorized-security-research)',
+        },
+      }
+    );
+    if (res.status === 404 || res.status === 400) return empty;
+    if (!res.ok) return { ...empty, names: [`API 오류: HTTP ${res.status}`] };
+    const data = await res.json() as HibpBreach[];
+    if (!Array.isArray(data) || data.length === 0) return empty;
+    const verified = data.filter(d => d.IsVerified);
+    const totalPwned = data.reduce((s, d) => s + (d.PwnCount || 0), 0);
+    return {
+      breached: data.length > 0,
+      count: data.length,
+      totalPwned,
+      names: data.map(d => d.Name).slice(0, 8),
+      breaches: data.slice(0, 5),
+    };
+  } catch (e) {
+    return { ...empty, names: [`조회 실패: ${String(e).slice(0, 60)}`] };
   }
 }
 
