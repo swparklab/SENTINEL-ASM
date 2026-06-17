@@ -9,6 +9,7 @@ import { audit } from '../../db/audit.js';
 import { id, now } from '../../util.js';
 import type { Asset, Consent, ScanIntensity, ScanJob } from '../../types.js';
 import { parseManifest, matchSbom, staticFileAudit, scanLicenses } from '../scanners/sbom.js';
+import { runSast } from '../scanners/sast.js';
 import { id as genId } from '../../util.js';
 import { prioritize } from '../risk/scoring.js';
 import { mapCompliance } from '../compliance/mapping.js';
@@ -32,7 +33,13 @@ export function scanSoftwareProject(
 
   for (const { filename, content } of files) {
     const { components, format } = parseManifest(filename, content);
-    const fFindings = [...matchSbom(components), ...staticFileAudit(filename, content)];
+    const isSrc = /\.(js|ts|py|php|java|rb|go|cs|cpp|c|rs|jsx|tsx)$/i.test(filename);
+    const fFindings = [
+      ...matchSbom(components),
+      ...staticFileAudit(filename, content),
+      ...scanLicenses(filename, content),
+      ...(isSrc ? runSast(filename, content) : []),
+    ];
     fileResults.push({ filename, format, componentCount: components.length, findingCount: fFindings.length });
     // 발견 중복 제거: module:title:target 으로 동일 취약점 합산
     for (const f of fFindings) {
@@ -74,7 +81,14 @@ export function scanSoftware(tenantId: string, actor: string, filename: string, 
   job: ScanJob; format: string; componentCount: number;
 } {
   const { components, format } = parseManifest(filename, content);
-  let findings = [...matchSbom(components), ...staticFileAudit(filename, content), ...scanLicenses(filename, content)];
+  // SAST 는 소스 파일 확장자에만 적용
+  const isSrc = /\.(js|ts|py|php|java|rb|go|cs|cpp|c|rs|jsx|tsx)$/i.test(filename);
+  let findings = [
+    ...matchSbom(components),
+    ...staticFileAudit(filename, content),
+    ...scanLicenses(filename, content),
+    ...(isSrc ? runSast(filename, content) : []),
+  ];
   // 매니페스트 미인식/0건 가시화 (커버리지 공백 투명 고지)
   if (format === '미인식' && !findings.length) {
     findings.push({ id: genId('fnd'), module: 'cve', severity: 'info', title: '매니페스트 형식 미인식', target: filename || 'file', description: '지원되는 의존성 매니페스트로 인식되지 않아 구성요소 CVE 대조를 수행하지 못했습니다.', evidence: `format=미인식`, remediation: 'package.json·requirements.txt·pom.xml·*.lock·SBOM(CycloneDX) 형식으로 제출하십시오.', confidence: 'firm' });

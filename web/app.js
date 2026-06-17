@@ -823,6 +823,63 @@ function Quick({ user, toast, onOpenReport }) {
   const [filename, setFilename] = useState('');    // 텍스트 붙여넣기용
   const [content, setContent] = useState('');
 
+  // ── SAST 상태 ──
+  const [sastCode, setSastCode] = useState('');
+  const [sastFilename, setSastFilename] = useState('app.js');
+  const [sastResult, setSastResult] = useState(null);
+  const [sastBusy, setSastBusy] = useState(false);
+  const scanSast = async () => {
+    if (!sastCode.trim()) return toast('소스코드를 붙여넣거나 파일을 선택하세요.', true);
+    setSastBusy(true); setSastResult(null);
+    const r = await api('POST', '/api/quick/sast', { filename: sastFilename, content: sastCode });
+    setSastBusy(false);
+    if (r.status === 200) { setSastResult(r.json); toast(`SAST 완료 — ${r.json.count}건 탐지`); }
+    else toast(r.json?.message || 'SAST 실패', true);
+  };
+  const onSastFile = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    setSastFilename(f.name); setSastCode(await f.text());
+  };
+
+  // ── 인증 세션 상태 ──
+  const [authedTarget, setAuthedTarget] = useState('');
+  const [authedCookie, setAuthedCookie] = useState('');
+  const [authedHeader, setAuthedHeader] = useState('');
+  const [authedAttested, setAuthedAttested] = useState(false);
+  const [authedJob, setAuthedJob] = useState(null);
+  const [authedBusy, setAuthedBusy] = useState(false);
+  const scanAuthed = async () => {
+    if (!authedTarget.trim()) return toast('도메인 또는 URL 을 입력하세요.', true);
+    if (!authedAttested) return toast('점검 권한 보유 확인이 필요합니다.', true);
+    setAuthedBusy(true); setAuthedJob(null);
+    const headers = authedHeader ? { Authorization: authedHeader } : undefined;
+    const r = await api('POST', '/api/quick/authed', { target: authedTarget, attested: authedAttested, sessionCookie: authedCookie || undefined, headers, modules: ['config', 'dast'] });
+    if (r.status !== 202) { setAuthedBusy(false); return toast(r.json?.message || '차단됨', true); }
+    let job = r.json;
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      await new Promise(res => setTimeout(res, 700));
+      const jr = await api('GET', `/api/scans/${job.id}`);
+      if (jr.json?.id) job = jr.json;
+      if (['completed','failed','aborted','rejected'].includes(job.status)) break;
+    }
+    setAuthedBusy(false); setAuthedJob(job);
+    toast(job.status === 'completed' ? `인증 점검 완료 — ${job.findings.length}건` : `상태: ${job.status}`, job.status !== 'completed');
+  };
+
+  // ── 위협 인텔 상태 ──
+  const [intelDomain, setIntelDomain] = useState('');
+  const [intelResult, setIntelResult] = useState(null);
+  const [intelBusy, setIntelBusy] = useState(false);
+  const checkIntel = async () => {
+    if (!intelDomain.trim()) return toast('도메인을 입력하세요.', true);
+    setIntelBusy(true); setIntelResult(null);
+    const r = await api('POST', '/api/quick/threatintel', { domain: intelDomain });
+    setIntelBusy(false);
+    if (r.status === 200) { setIntelResult(r.json); toast(r.json.breached ? `⚠ ${r.json.count}건 유출 이력` : '유출 이력 없음'); }
+    else toast(r.json?.message || '조회 실패', true);
+  };
+
   // 분석 가치가 있는 파일 필터
   const isRelevant = (name) => {
     const n = name.toLowerCase().replace(/^.*[\\/]/, '');
@@ -982,6 +1039,9 @@ function Quick({ user, toast, onOpenReport }) {
       <div class="seg">
         <button class=${tab === 'domain' ? 'on' : ''} onClick=${() => setTab('domain')}>🔗 도메인 · URL</button>
         <button class=${tab === 'file' ? 'on' : ''} onClick=${() => setTab('file')}>📂 소프트웨어 프로젝트</button>
+        <button class=${tab === 'sast' ? 'on' : ''} onClick=${() => setTab('sast')}>🔬 소스코드 SAST</button>
+        <button class=${tab === 'authed' ? 'on' : ''} onClick=${() => setTab('authed')}>🔐 인증 세션 점검</button>
+        <button class=${tab === 'intel' ? 'on' : ''} onClick=${() => setTab('intel')}>🕵️ 위협 인텔</button>
       </div>
 
       ${tab === 'domain' && html`
@@ -1096,7 +1156,74 @@ function Quick({ user, toast, onOpenReport }) {
         : html`<div class=${domainJob.status === 'rejected' ? 'no' : 'muted'}>상태: ${domainJob.status} ${domainJob.gateDecision?.reason ? '— ' + domainJob.gateDecision.reason : ''}</div>`}
       </div>`}
 
-      ${!domainJob && !fileJob && !bulk && html`<div class="coverage">
+      ${tab === 'sast' && html`
+        <div class="filebox">
+          <h3 style=${{ margin:'0 0 10px' }}>🔬 소스코드 SAST — 정적 보안 분석</h3>
+          <div class="muted" style=${{ marginBottom:10, fontSize:13 }}>JS/TS·Python·PHP·Java·Go·Ruby 등 소스 파일을 붙여넣거나 업로드하면 SQL 인젝션·XSS·명령 인젝션·역직렬화·하드코딩 시크릿 등 <b>23개 룰</b>로 즉시 분석합니다.</div>
+          <div class="row">
+            <div style=${{ flex:0 }}><label>파일명(언어 감지용)</label><input value=${sastFilename} onChange=${e=>setSastFilename(e.target.value)} placeholder="app.js" /></div>
+            <div style=${{ flex:0 }}><label>파일 업로드</label><input type="file" onChange=${onSastFile} /></div>
+          </div>
+          <label>소스코드 붙여넣기</label>
+          <textarea rows="10" class="mono" value=${sastCode} placeholder="// 취약한 코드를 붙여넣으세요\nconst r = db.query('SELECT * FROM users WHERE id=' + req.params.id);" onChange=${e=>setSastCode(e.target.value)}></textarea>
+          <div style=${{ marginTop:10, textAlign:'center' }}><button class="primary" onClick=${scanSast} disabled=${sastBusy}>${sastBusy ? '분석 중…' : '🔍 SAST 분석'}</button></div>
+        </div>
+        ${sastResult && html`<div class="panel result-card" style=${{ marginTop:14 }}>
+          <div style=${{ display:'flex', justifyContent:'space-between', flexWrap:'wrap', gap:8 }}>
+            <b>SAST 결과</b> <span class="muted">· ${sastResult.filename} · ${sastResult.count}건 탐지</span>
+            <${FixPromptButton} findings=${sastResult.findings} target=${sastResult.filename} />
+          </div>
+          <div style=${{ margin:'10px 0' }}><${ScoreBadge} findings=${sastResult.findings} /></div>
+          <${FindingsPanel} findings=${sastResult.findings} />
+        </div>`}
+      `}
+
+      ${tab === 'authed' && html`
+        <div class="filebox">
+          <h3 style=${{ margin:'0 0 10px' }}>🔐 인증 세션 점검 — 로그인 후 영역 분석</h3>
+          <div class="muted" style=${{ marginBottom:10, fontSize:13 }}>세션 쿠키 또는 Bearer 토큰을 입력하면 로그인 후 영역(인증이 필요한 페이지)의 보안 헤더·CORS·인증 설정을 점검합니다.</div>
+          <label>도메인 / URL</label>
+          <input value=${authedTarget} placeholder="https://app.example.com" onChange=${e=>setAuthedTarget(e.target.value)} />
+          <label>세션 쿠키 (선택)</label>
+          <input value=${authedCookie} placeholder="sessionid=abc123; csrftoken=xyz" onChange=${e=>setAuthedCookie(e.target.value)} class="mono" />
+          <label>Authorization 헤더 값 (선택)</label>
+          <input value=${authedHeader} placeholder="Bearer eyJhbGciOi..." onChange=${e=>setAuthedHeader(e.target.value)} class="mono" />
+          <label class="attest" style=${{ marginTop:12 }}>
+            <input type="checkbox" checked=${authedAttested} onChange=${e=>setAuthedAttested(e.target.checked)} />
+            <span>본인이 소유하거나 점검 권한을 보유한 대상입니다. (필수)</span>
+          </label>
+          <div style=${{ marginTop:10, textAlign:'center' }}><button class="primary" onClick=${scanAuthed} disabled=${authedBusy || !authedAttested}>${authedBusy ? '점검 중…' : '🔐 인증 점검 시작'}</button></div>
+          <div class="muted" style=${{ fontSize:12, marginTop:6, textAlign:'center' }}>현재 버전: 비인증 점검 수행 (인증 세션 워커 주입은 v2 예정)</div>
+        </div>
+        ${authedJob?.status === 'completed' && html`<div class="panel result-card" style=${{ marginTop:14 }}>
+          <b>인증 점검 결과</b> <span class="muted">· ${authedJob.findings.length}건</span>
+          <div style=${{ margin:'10px 0' }}><${ScoreBadge} findings=${authedJob.findings} /></div>
+          <${FindingsPanel} findings=${authedJob.findings} />
+        </div>`}
+      `}
+
+      ${tab === 'intel' && html`
+        <div class="filebox">
+          <h3 style=${{ margin:'0 0 10px' }}>🕵️ 위협 인텔 — 유출 이력 확인</h3>
+          <div class="muted" style=${{ marginBottom:10, fontSize:13 }}>HIBP(Have I Been Pwned) 공개 API로 해당 도메인의 이메일 계정 유출 이력을 조회합니다. (무료 공개 API)</div>
+          <label>도메인</label>
+          <div class="searchbox">
+            <span class="icon">🕵️</span>
+            <input value=${intelDomain} placeholder="example.com" onChange=${e=>setIntelDomain(e.target.value)} onKeyDown=${e=>e.key==='Enter'&&checkIntel()} />
+            <button class="primary" onClick=${checkIntel} disabled=${intelBusy}>${intelBusy ? '조회 중…' : '유출 조회'}</button>
+          </div>
+          ${intelResult && html`<div class="panel" style=${{ marginTop:14 }}>
+            ${intelResult.breached
+              ? html`<div class="no" style=${{ fontWeight:700, marginBottom:8 }}>⚠ 유출 이력 ${intelResult.count}건 확인됨</div>
+                     <div class="muted">관련 침해 사고: ${(intelResult.names || []).join(', ')}</div>
+                     <div style=${{ marginTop:8 }}>이 도메인의 이메일 계정이 ${intelResult.count}건의 데이터 침해 사고에 포함되었습니다. 해당 계정의 비밀번호 즉시 변경과 MFA 적용을 권고합니다.</div>`
+              : html`<div class="ok" style=${{ fontWeight:700 }}>✅ 유출 이력 없음</div>
+                     <div class="muted" style=${{ marginTop:6 }}>공개 데이터 침해 사고에서 이 도메인의 이메일 계정이 발견되지 않았습니다.</div>`}
+          </div>`}
+        </div>
+      `}
+
+      ${!domainJob && !fileJob && !bulk && tab === 'domain' && html`<div class="coverage">
         <div class="cov-title">엔터프라이즈 점검 커버리지</div>
         <div class="cov-grid">
           ${COVERAGE_CARDS.map((c) => html`<div key=${c.t} class="cov-card">

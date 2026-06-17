@@ -14,6 +14,8 @@ import { issueOwnershipChallenge, verifyOwnership } from './modules/authorizatio
 import { revokeConsent, currentConsentStatus, computeEgressAllowlist } from './modules/authorizationGate/gate.js';
 import { orchestrator } from './modules/orchestrator/orchestrator.js';
 import { scanSoftware, scanSoftwareProject, scanDomainQuick } from './modules/quick/quick.js';
+import { runSast } from './modules/scanners/sast.js';
+import { checkHibpDomain } from './modules/scanners/cloud.js';
 import { buildReport, reportToMarkdown, reportToHtml } from './modules/reports/report.js';
 import { aggregateRisk } from './modules/risk/scoring.js';
 import type { Asset, Consent } from './types.js';
@@ -219,6 +221,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(201).send({ job, format, componentCount });
     });
 
+    // 1c) SAST — 소스 파일 정적 보안 분석 (단독 엔드포인트)
+    api.post('/api/quick/sast', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
+      const v = validate(z.object({
+        filename: z.string().min(1),
+        content: z.string().min(1),
+      }), req.body);
+      if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
+      const findings = runSast(v.data.filename, v.data.content);
+      audit({ tenantId: req.auth!.tenantId, actor: req.auth!.email, action: 'quick.sast', target: v.data.filename, outcome: 'info', reason: `${findings.length}건 탐지` });
+      return reply.code(200).send({ filename: v.data.filename, findings, count: findings.length });
+    });
+
+    // 1d) 위협 인텔 — HIBP 도메인 유출 확인 (무료 API)
+    api.post('/api/quick/threatintel', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
+      const v = validate(z.object({ domain: z.string().min(1) }), req.body);
+      if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
+      const result = await checkHibpDomain(v.data.domain);
+      audit({ tenantId: req.auth!.tenantId, actor: req.auth!.email, action: 'quick.threatintel', target: v.data.domain, outcome: 'info', reason: result.breached ? `유출 ${result.count}건` : '유출 없음' });
+      return reply.code(200).send({ domain: v.data.domain, ...result });
+    });
+
     // 1b) 소프트웨어 프로젝트(폴더/다중 파일) 통합 정적 분석
     api.post('/api/quick/sbom/project', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
       const v = validate(z.object({
@@ -244,6 +267,35 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       try {
         const { job } = scanDomainQuick(req.auth!.tenantId, req.auth!.email, v.data.target, v.data.attested, v.data.modules, v.data.deep);
+        return reply.code(job.status === 'rejected' ? 422 : 202).send(job);
+      } catch (e) {
+        return reply.code(400).send({ error: 'bad_request', message: String(e instanceof Error ? e.message : e) });
+      }
+    });
+
+    // 2b) 인증 세션 점검 — 쿠키·헤더 주입으로 로그인 후 영역 점검
+    api.post('/api/quick/authed', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
+      const v = validate(z.object({
+        target: z.string().min(1),
+        attested: z.boolean(),
+        /** 세션 쿠키 (예: "sessionid=abc123; csrftoken=xyz") */
+        sessionCookie: z.string().optional(),
+        /** 추가 요청 헤더 (예: {"Authorization":"Bearer token"}) */
+        headers: z.record(z.string()).optional(),
+        modules: z.array(z.enum(['asm', 'config', 'cve', 'dast'])).default(['config', 'dast']),
+      }), req.body);
+      if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
+      if (!v.data.attested) return reply.code(403).send({ error: 'attestation_required', message: '점검 권한 보유 확인이 필요합니다.' });
+      try {
+        // 인증 정보를 동의·자산에 메타로 저장하고 점검 큐잉
+        const { job, asset } = scanDomainQuick(
+          req.auth!.tenantId, req.auth!.email, v.data.target, v.data.attested, v.data.modules as any,
+        );
+        // 인증 헤더는 job 메타에만 기록(실제 워커 주입은 향후 확장)
+        if (v.data.sessionCookie || v.data.headers) {
+          repos.scanJobs.update(job.id, { error: `[인증 세션 점검] cookie=${v.data.sessionCookie ? '있음' : '없음'}, headers=${Object.keys(v.data.headers ?? {}).join(',')} — 현재 버전은 비인증 점검 수행(인증 세션 워커 주입은 v2 예정)` });
+        }
+        audit({ tenantId: req.auth!.tenantId, actor: req.auth!.email, action: 'quick.authed', target: v.data.target, outcome: 'allow', reason: '인증 세션 점검 요청' });
         return reply.code(job.status === 'rejected' ? 422 : 202).send(job);
       } catch (e) {
         return reply.code(400).send({ error: 'bad_request', message: String(e instanceof Error ? e.message : e) });
