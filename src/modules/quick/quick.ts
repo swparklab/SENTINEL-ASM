@@ -121,12 +121,42 @@ export function scanSoftware(tenantId: string, actor: string, filename: string, 
   return { job, format, componentCount: components.length };
 }
 
-/** 정규화: scheme/path/port 제거하여 호스트만 추출. */
-function hostOf(target: string): string {
-  return target.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/[/?#].*$/, '').replace(/:.*/, '');
+/**
+ * 정규화: 어떤 형식이든 스캔 가능한 호스트명으로 변환.
+ * - www.naver.com        → www.naver.com
+ * - naver.com            → naver.com
+ * - naver.com/sw         → naver.com  (경로 제거)
+ * - https://naver.com/   → naver.com  (스킴·경로 제거)
+ * - s.naver.com          → s.naver.com
+ * - 127.0.0.1:8787       → 127.0.0.1  (포트 제거)
+ * - NAVER.COM            → naver.com  (소문자)
+ */
+export function hostOf(target: string): string {
+  return target.trim().toLowerCase()
+    .replace(/^https?:\/\//, '')   // 스킴 제거
+    .replace(/[/?#].*$/, '')        // 경로·쿼리·해시 제거
+    .replace(/:.*/, '')             // 포트 제거
+    .replace(/\.$/, '');            // 끝 점 제거 (FQDN 스타일)
 }
 
-export interface QuickDomainResult { job: ScanJob; asset: Asset; }
+/** 입력 원본에서 사용자가 이해할 수 있는 변환 내역을 반환. */
+export function parseTarget(raw: string): { host: string; original: string; changed: boolean; note: string } {
+  const original = raw.trim();
+  const host = hostOf(original);
+  const stripped: string[] = [];
+  if (/^https?:\/\//i.test(original)) stripped.push('스킴(https://)');
+  if (/[/?#]/.test(original.replace(/^https?:\/\//, ''))) stripped.push('경로/쿼리');
+  if (/:\d+/.test(original.replace(/^https?:\/\//, '').split(/[/?#]/)[0] ?? '')) stripped.push('포트');
+  if (/[A-Z]/.test(original)) stripped.push('대소문자 통일');
+  return {
+    host,
+    original,
+    changed: host !== original.toLowerCase(),
+    note: stripped.length ? `${stripped.join('·')} 제거 후 "${host}" 로 점검` : '',
+  };
+}
+
+export interface QuickDomainResult { job: ScanJob; asset: Asset; normalizedHost: string; originalInput: string; }
 
 /**
  * 도메인/URL 빠른 점검. attestation(권한 보유 확인)을 전제로 자산·동의를 자동 생성한다.
@@ -138,7 +168,8 @@ export function scanDomainQuick(
   deep = false,
 ): QuickDomainResult {
   if (!attested) throw new Error('점검 권한 보유 확인(attestation)이 필요합니다.');
-  const host = hostOf(target);
+  const parsed = parseTarget(target);
+  const host = parsed.host;
   if (!host) throw new Error('유효한 도메인/URL 이 아닙니다.');
 
   const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
@@ -180,5 +211,5 @@ export function scanDomainQuick(
 
   const intensity: ScanIntensity = 'standard';
   const job = orchestrator.enqueue({ tenantId, asset, consent, modules, intensity, deep, actor });
-  return { job, asset };
+  return { job, asset, normalizedHost: host, originalInput: target };
 }

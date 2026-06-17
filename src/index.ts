@@ -20,6 +20,13 @@ async function main() {
   // 헬스체크 (설계 §8.1 가용성/관측)
   app.get('/healthz', async () => ({ status: 'ok', service: 'sentinel-asm', ts: new Date().toISOString() }));
 
+  // 도메인 정규화 미리보기 — 인증 불필요, 읽기 전용
+  app.get('/api/normalize', async (req) => {
+    const { parseTarget } = await import('./modules/quick/quick.js');
+    const raw = String((req.query as any).q ?? '');
+    return raw ? parseTarget(raw) : { host: '', original: '', changed: false, note: '' };
+  });
+
   // 정적 웹 콘솔 (설계 §2.1 프레젠테이션 계층)
   if (fs.existsSync(config.publicDir)) {
     await app.register(fastifyStatic, { root: config.publicDir, prefix: '/' });

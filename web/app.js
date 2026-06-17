@@ -928,6 +928,30 @@ function Quick({ user, toast, onOpenReport }) {
 
   // 도메인/URL
   const [target, setTarget] = useState('');
+  const [normHint, setNormHint] = useState(null);   // { host, changed, note }
+  const normTimer = useRef(null);
+
+  // 입력 변경 시 정규화 힌트를 즉시 계산 (API 없이 프런트에서)
+  const normalizeLocal = (raw) => {
+    const t = raw.trim().toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/[/?#].*$/, '')
+      .replace(/:.*/, '')
+      .replace(/\.$/, '');
+    return t;
+  };
+  const onTargetChange = (val) => {
+    setTarget(val);
+    if (!val.trim()) { setNormHint(null); return; }
+    const host = normalizeLocal(val);
+    const original = val.trim();
+    const changed = host !== original.toLowerCase();
+    const notes = [];
+    if (/^https?:\/\//i.test(original)) notes.push('스킴 제거');
+    if (/[/?#]/.test(original.replace(/^https?:\/\//, ''))) notes.push('경로 제거');
+    if (/:\d+/.test(original.replace(/^https?:\/\//, '').split(/[/?#]/)[0] ?? '')) notes.push('포트 제거');
+    setNormHint({ host, changed, note: notes.join(' · ') });
+  };
   const [attested, setAttested] = useState(false);
   const [domainJob, setDomainJob] = useState(null);
   const [bulk, setBulk] = useState(null);
@@ -976,8 +1000,9 @@ function Quick({ user, toast, onOpenReport }) {
   const scanDomain = async () => {
     if (!target.trim()) return toast('도메인 또는 URL 을 입력하세요.', true);
     if (!attested) return toast('점검 권한 보유 확인에 체크해야 합니다. (법적 필수)', true);
+    // 쉼표·공백으로 구분된 여러 대상 지원 (각각 정규화)
     const parts = target.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-    if (parts.length > 1) return scanBulk(parts);
+    if (parts.length > 1) return scanBulk(parts);  // 이미 scanBulk 내부에서 정규화됨
     setScanning(true); setDomainJob(null); setBulk(null); setLive(null);
     cancelRef.current = false; curJobRef.current = null;
     const start = Date.now();
@@ -1009,6 +1034,10 @@ function Quick({ user, toast, onOpenReport }) {
       if (job.status === 'completed') {
         setProg({ pct: 100, label: `완료 · 총 ${total}초 소요`, eta: 0 });
         setDomainJob(job); setLive(null);
+        // 정규화 힌트 업데이트 (서버가 실제로 사용한 호스트 표시)
+        if (job.normalizedHost && job.normalizedHost !== normHint?.host) {
+          setNormHint({ host: job.normalizedHost, changed: false, note: '실제 점검 완료' });
+        }
         toast(`점검 완료 — ${job.findings.length}건 발견`);
       } else if (isTerminal(job.status)) {
         setProg({ pct: 100, label: `상태: ${job.status}`, eta: 0 });
@@ -1048,10 +1077,17 @@ function Quick({ user, toast, onOpenReport }) {
         <div>
           <div class="searchbox">
             <span class="icon">🔍</span>
-            <input value=${target} placeholder="도메인/URL 입력 — 여러 개는 콤마·공백으로 구분 (일괄 점검)"
-              onChange=${(e) => setTarget(e.target.value)} onKeyDown=${onKey} autoFocus />
+            <input value=${target}
+              placeholder="naver.com / www.naver.com / naver.com/sw / https://s.naver.com — 어떤 형식이든 OK"
+              onChange=${(e) => onTargetChange(e.target.value)}
+              onKeyDown=${onKey} autoFocus />
             <button class="primary" onClick=${scanDomain} disabled=${scanning || !attested}>${scanning ? '점검 중…' : '점검 시작'}</button>
           </div>
+          ${normHint && html`<div class="norm-hint">
+            ${normHint.changed
+              ? html`<span class="norm-arrow">→</span> <b class="norm-host">${normHint.host}</b> <span class="norm-note">(${normHint.note})</span>`
+              : html`<span class="norm-ok">✓</span> <b class="norm-host">${normHint.host}</b>`}
+          </div>`}
           <div class="depth-sel">
             <button class=${!deep ? 'on' : ''} onClick=${() => setDeep(false)}>
               <div class="d-t">⚡ 간단 점검</div><div class="d-d">핵심·고신호 항목 · 빠름(~30초)</div></button>
@@ -1144,7 +1180,11 @@ function Quick({ user, toast, onOpenReport }) {
       ${tab === 'domain' && domainJob && !bulk && html`<div class="panel result-card">
         ${domainJob.status === 'completed' ? html`
           <div style=${{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-            <div><b>점검 결과</b> <span class="depth-badge">${domainJob.depth === 'deep' ? '🔬 심층' : '⚡ 간단'}</span> <span class="muted">· ${domainJob.findings.length}건 발견</span></div>
+            <div>
+              <b>점검 결과</b>
+              <span class="depth-badge">${domainJob.depth === 'deep' ? '🔬 심층' : '⚡ 간단'}</span>
+              <span class="muted">· ${domainJob.normalizedHost || domainJob.assetId} · ${domainJob.findings.length}건 발견</span>
+            </div>
             <div style=${{ display: 'flex', gap: 8 }}>
               <button onClick=${scanDomain} disabled=${scanning} title="동일 설정으로 다시 점검(폐루프)">↻ 재점검</button>
               <${FixPromptButton} findings=${domainJob.findings} target=${target} />

@@ -13,7 +13,7 @@ import {
 import { issueOwnershipChallenge, verifyOwnership } from './modules/authorizationGate/ownership.js';
 import { revokeConsent, currentConsentStatus, computeEgressAllowlist } from './modules/authorizationGate/gate.js';
 import { orchestrator } from './modules/orchestrator/orchestrator.js';
-import { scanSoftware, scanSoftwareProject, scanDomainQuick } from './modules/quick/quick.js';
+import { scanSoftware, scanSoftwareProject, scanDomainQuick, parseTarget } from './modules/quick/quick.js';
 import { runSast } from './modules/scanners/sast.js';
 import { checkHibpDomain } from './modules/scanners/cloud.js';
 import { buildReport, reportToMarkdown, reportToHtml } from './modules/reports/report.js';
@@ -266,8 +266,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(403).send({ error: 'attestation_required', message: '점검 권한 보유 확인(attestation)이 필요합니다. (설계 §0/§3)' });
       }
       try {
-        const { job } = scanDomainQuick(req.auth!.tenantId, req.auth!.email, v.data.target, v.data.attested, v.data.modules, v.data.deep);
-        return reply.code(job.status === 'rejected' ? 422 : 202).send(job);
+        const { job, normalizedHost, originalInput } = scanDomainQuick(req.auth!.tenantId, req.auth!.email, v.data.target, v.data.attested, v.data.modules, v.data.deep);
+        return reply.code(job.status === 'rejected' ? 422 : 202).send({ ...job, normalizedHost, originalInput });
       } catch (e) {
         return reply.code(400).send({ error: 'bad_request', message: String(e instanceof Error ? e.message : e) });
       }
