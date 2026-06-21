@@ -819,7 +819,9 @@ function friendlyGateReason(raw) {
   if (raw.includes('동의') || raw.includes('consent')) return '이 사이트를 점검해도 된다는 사전 동의가 없습니다. → 동의·범위 메뉴에서 등록하세요.';
   if (raw.includes('범위') || raw.includes('scope')) return '이 주소는 허용된 점검 범위를 벗어났습니다. → 동의·범위에서 허용 대상을 추가하세요.';
   if (raw.includes('윈도우') || raw.includes('window')) return '점검 허용 시간이 아닙니다. → 동의·범위에서 허용 시간 범위를 확인하세요.';
-  if (raw.includes('강도') || raw.includes('intensity')) return '요청한 점검 강도가 허용 범위를 초과했습니다.';
+  if (raw.includes('활성')) return '활성(침투) 검증은 aggressive 강도 + 4-eyes 승인에서만 가능합니다. → 동의·범위 등록에서 이 자산의 "최대 강도"를 aggressive 로 올리고 "Aggressive 승인자"를 입력하세요. (제한은 권한 보호용이라 제거되지 않습니다)';
+  if (raw.includes('4-eyes') || raw.includes('서면 승인') || raw.includes('Aggressive 프로파일')) return 'aggressive 점검은 두 번째 승인자의 서면 승인(4-eyes)이 필요합니다. → 동의·범위 등록의 "Aggressive 승인자" 칸에 승인자를 입력하세요.';
+  if (raw.includes('강도') || raw.includes('intensity')) return '요청한 점검 강도가 동의 허용 한도를 초과했습니다. → 동의·범위 등록에서 이 자산의 "최대 강도"를 원하는 수준으로 올리세요(aggressive는 승인자 입력 필수). 게이트는 권한 보호를 위한 것이라 제거할 수 없습니다.';
   return raw;
 }
 

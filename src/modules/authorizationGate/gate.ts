@@ -85,12 +85,12 @@ export function evaluateGate(req: GateRequest): GateDecision {
 
   // 4) 강도 한도 (설계 §4.5)
   if (INTENSITY_RANK[req.intensity] > INTENSITY_RANK[consent.scope.maxIntensity]) {
-    return reject(`요청 강도(${req.intensity})가 동의 한도(${consent.scope.maxIntensity})를 초과합니다.`);
+    return reject(`요청 강도(${req.intensity})가 동의 한도(${consent.scope.maxIntensity})를 초과합니다. 동의·범위에서 해당 자산의 최대 강도를 올리십시오(aggressive 는 4-eyes 승인 필요).`);
   }
   // Aggressive 는 추가 서면 승인 필요 (설계 §4.5 / §9 4-eyes)
   // active 는 위에서 이미 aggressive 를 강제했으므로, 이 검사로 4-eyes 서면승인이 자동 강제된다.
   if (req.intensity === 'aggressive' && !consent.aggressiveApprovedBy) {
-    return reject('Aggressive 프로파일은 추가 서면 승인(4-eyes)이 필요합니다.');
+    return reject('Aggressive 프로파일은 추가 서면 승인(4-eyes)이 필요합니다. 동의 등록 시 "Aggressive 승인자"를 입력하십시오.');
   }
 
   // 5) 범위(scope) 검증 — 모든 점검 대상이 승인 범위에 속해야 함 (설계 §3.2)
