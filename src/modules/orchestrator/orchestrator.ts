@@ -24,6 +24,8 @@ export interface EnqueueParams {
   modules: ScanModule[];
   intensity: ScanIntensity;
   deep?: boolean;
+  /** 활성(침투) 검증 — aggressive + 4-eyes 게이트에서만 통과 */
+  active?: boolean;
   actor: string;
 }
 
@@ -36,7 +38,7 @@ class Orchestrator {
     const targets = [p.asset.value]; // 능동 발신 대상 (서브도메인은 범위 내 자동 포함)
     const decision = evaluateGate({
       tenantId: p.tenantId, asset: p.asset, consent: p.consent,
-      intensity: p.intensity, modules: p.modules, targets, actor: p.actor,
+      intensity: p.intensity, modules: p.modules, targets, active: p.active, actor: p.actor,
     });
 
     const job: ScanJob = {
@@ -47,6 +49,7 @@ class Orchestrator {
       modules: p.modules,
       intensity: p.intensity,
       depth: p.deep ? 'deep' : 'simple',
+      active: p.active === true && decision.allowed,
       status: decision.allowed ? 'queued' : 'rejected',
       gateDecision: { allowed: decision.allowed, reason: decision.reason, checkedAt: decision.checkedAt },
       requestedBy: p.actor,
@@ -115,11 +118,15 @@ class Orchestrator {
     const logs: string[] = [];
     const ctx = {
       asset, guard, intensity: job.intensity, allowedPorts,
-      tenantId: job.tenantId, jobId, deep: job.depth === 'deep', targets: [asset.value],
+      tenantId: job.tenantId, jobId, deep: job.depth === 'deep', active: job.active === true, targets: [asset.value],
       log: (m: string) => logs.push(m),
     };
+    if (ctx.active) {
+      logs.push('활성(침투) 검증 모드 — 취약점 실제 확정(비파괴 한정: 데이터 변경·DoS·brute-force 없음)');
+      audit({ tenantId: job.tenantId, actor: job.requestedBy, action: 'scan.active', target: asset.value, outcome: 'info', reason: 'active 검증 활성(aggressive+4-eyes 통과)', meta: { jobId } });
+    }
 
-    const MODULE_LABEL: Record<ScanModule, string> = { asm: 'ASM(공격표면)', config: '구성·헤더', cve: 'CVE·SBOM', dast: '동적(DAST)' };
+    const MODULE_LABEL: Record<ScanModule, string> = { asm: 'ASM(공격표면)', config: '구성·헤더', cve: 'CVE·SBOM', dast: '동적(DAST)', access: '접근통제·자동수집', ai: 'AI 적응형 점검' };
     type MS = NonNullable<ScanJob['moduleStatus']>[number];
     const moduleStatus: MS[] = job.modules.map((m) => ({ module: m, status: 'pending', findings: 0 }));
     repos.scanJobs.update(jobId, { progress: 3, stage: '점검 초기화', moduleStatus });

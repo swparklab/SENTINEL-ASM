@@ -131,8 +131,8 @@ const CLASSES: Klass[] = [
     ],
   },
   {
-    // 관리/인증/접근통제
-    match: (f) => /관리|admin|wp-admin|manager|phpmyadmin|인증|세션|접근통제|인가/.test(f.title),
+    // 관리/인증/접근통제 (BAC: 인가 누락·우회·IDOR·권한 파라미터 변조 포함)
+    match: (f) => /관리|admin|wp-admin|manager|phpmyadmin|인증|세션|접근통제|인가|객체 참조|idor|권한 파라미터|허가되지 않은/i.test(f.title),
     cwe: 'CWE-284', owasp: T10.A01,
     references: ['https://owasp.org/Top10/A01_2021-Broken_Access_Control/', 'https://cwe.mitre.org/data/definitions/284.html'],
     frameworks: [

@@ -20,6 +20,8 @@ export interface GateRequest {
   modules: ScanModule[];
   /** 능동 발신이 필요한 실제 점검 대상들 (서브도메인/호스트 등) */
   targets: string[];
+  /** 활성(침투) 검증 모드 — 취약점을 실제 트리거해 확정(비파괴 한정). aggressive + 4-eyes 필수. */
+  active?: boolean;
   actor: string;
 }
 
@@ -82,6 +84,10 @@ export function evaluateGate(req: GateRequest): GateDecision {
   // Aggressive 는 추가 서면 승인 필요 (설계 §4.5 / §9 4-eyes)
   if (req.intensity === 'aggressive' && !consent.aggressiveApprovedBy) {
     return reject('Aggressive 프로파일은 추가 서면 승인(4-eyes)이 필요합니다.');
+  }
+  // 활성(침투) 검증은 aggressive 강도에서만 — 따라서 4-eyes 서면승인이 자동으로 강제된다.
+  if (req.active && req.intensity !== 'aggressive') {
+    return reject('활성(침투) 검증 모드는 aggressive 강도(+ 4-eyes 서면승인)에서만 허용됩니다.');
   }
 
   // 5) 범위(scope) 검증 — 모든 점검 대상이 승인 범위에 속해야 함 (설계 §3.2)
