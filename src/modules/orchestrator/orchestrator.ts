@@ -49,7 +49,8 @@ class Orchestrator {
       modules: p.modules,
       intensity: p.intensity,
       depth: p.deep ? 'deep' : 'simple',
-      active: p.active === true && decision.allowed,
+      // 방어심도: active 는 게이트 통과 + aggressive 강도일 때만 true. 게이트에 구멍이 생겨도 비-aggressive 작업은 active 가 될 수 없다.
+      active: p.active === true && decision.allowed && p.intensity === 'aggressive',
       status: decision.allowed ? 'queued' : 'rejected',
       gateDecision: { allowed: decision.allowed, reason: decision.reason, checkedAt: decision.checkedAt },
       requestedBy: p.actor,

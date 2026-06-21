@@ -32,7 +32,7 @@ export async function analyzeFindings(findings: Finding[]): Promise<AiAnalysis |
     target: redact(f.target),
   }));
   const counts = findings.reduce<Record<string, number>>((a, f) => { a[f.severity] = (a[f.severity] ?? 0) + 1; return a; }, {});
-  const user = JSON.stringify({ severityCounts: counts, findings: slim });
+  const user = redact(JSON.stringify({ severityCounts: counts, findings: slim }));
   const res = await aiJson<AiAnalysis>({ system: SYSTEM, user, maxTokens: 3072 });
   if (!res || typeof res !== 'object' || !res.executiveSummary) return null;
   // 방어적 정규화

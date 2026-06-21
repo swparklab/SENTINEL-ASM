@@ -4,7 +4,7 @@
  * 모델은 계획만 만든다 — 실제 발신은 verifier 가 EgressGuard 로 GET/HEAD/OPTIONS 만 수행한다.
  */
 import { aiJson } from './provider.js';
-import type { SiteFingerprint } from './fingerprint.js';
+import { redact, type SiteFingerprint } from './fingerprint.js';
 
 export interface AiProbe {
   path: string;
@@ -15,8 +15,11 @@ export interface AiProbe {
 }
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-/** 경로/근거에 파괴적 의도가 드러나면 거부(이중 안전장치). */
-const DESTRUCTIVE = /\b(delete|drop|truncate|shutdown|destroy|wipe|format|;rm|--|\bunion\b|sleep\(|benchmark\(|\bexec\b)\b/i;
+/**
+ * 경로/근거에 파괴적 의도가 드러나면 거부(이중 안전장치). 토큰별로 경계 처리를 분리한다.
+ * 단어형(delete/drop/…)은 \b 로, SQL 주석 `--` 와 셸 `;rm` 은 비단어문자라 \b 없이 리터럴로 매칭한다.
+ */
+const DESTRUCTIVE = /\b(?:delete|drop|truncate|shutdown|destroy|wipe|format|union|exec)\b|--|;\s*rm\b|\brm\s+-rf|sleep\s*\(|benchmark\s*\(/i;
 
 const SYSTEM = `당신은 "권한이 검증된 대상"을 점검하는 SENTINEL-ASM 의 비파괴(non-destructive) 적응형 점검 플래너다.
 주어진 사이트 핑거프린트(용도·기술스택·경로·폼·API 힌트)를 보고, 이 사이트의 실제 데이터 모델에 특화된
@@ -37,7 +40,8 @@ category 예: "data-exposure" | "bola" | "access-control" | "misconfig" | "info-
 
 export async function proposeProbes(fp: SiteFingerprint, max: number): Promise<AiProbe[]> {
   const system = SYSTEM.replace('{N}', String(max));
-  const arr = await aiJson<unknown>({ system, user: JSON.stringify(fp), maxTokens: 2048 });
+  // 외부 LLM 으로 나가기 직전 최종 마스킹(방어심도) — 구조 필드까지 PII/시크릿 제거 보장.
+  const arr = await aiJson<unknown>({ system, user: redact(JSON.stringify(fp)), maxTokens: 2048 });
   if (!Array.isArray(arr)) return [];
   const out: AiProbe[] = [];
   const seen = new Set<string>();

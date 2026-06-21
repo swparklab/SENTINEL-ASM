@@ -66,7 +66,7 @@ export function buildFingerprint(input: {
   const { host, scheme, status, headers, body } = input;
   const hj = JSON.stringify(headers).toLowerCase();
   const title = redact((body.match(/<title[^>]*>([^<]{1,120})<\/title>/i)?.[1] ?? '').trim());
-  const metaGenerator = (body.match(/<meta[^>]+name=["']generator["'][^>]+content=["']([^"']{1,80})["']/i)?.[1] ?? '').trim();
+  const metaGenerator = redact((body.match(/<meta[^>]+name=["']generator["'][^>]+content=["']([^"']{1,80})["']/i)?.[1] ?? '').trim());
 
   const tech = [...new Set(TECH_SIGS.filter((t) => t.re.test(body.slice(0, 60_000)) || t.re.test(hj)).map((t) => t.name))];
   const present: string[] = []; const missing: string[] = [];
@@ -84,7 +84,7 @@ export function buildFingerprint(input: {
     const method = (attrs.match(/method\s*=\s*["']([^"']+)["']/i)?.[1] ?? 'get').toUpperCase();
     const inputs = [...inner.matchAll(/<(?:input|select|textarea)\b[^>]*\bname\s*=\s*["']([^"']{1,40})["']/gi)]
       .map((m) => m[1]!).slice(0, 12);
-    forms.push({ action, method, inputs });
+    forms.push({ action: redact(action), method, inputs: inputs.map(redact) });
   }
 
   // 동일 출처 경로 수집(href/src/action)
@@ -115,15 +115,15 @@ export function buildFingerprint(input: {
 
   return {
     host, scheme, status, title,
-    server: (headers['server'] || '').slice(0, 60),
-    poweredBy: (headers['x-powered-by'] || '').slice(0, 60),
+    server: redact((headers['server'] || '').slice(0, 60)),
+    poweredBy: redact((headers['x-powered-by'] || '').slice(0, 60)),
     metaGenerator,
     tech,
     securityHeaders: { present, missing },
-    cookieNames,
+    cookieNames: cookieNames.map(redact),
     forms,
-    paths: [...paths].slice(0, 30),
-    apiHints,
+    paths: [...paths].slice(0, 30).map(redact),
+    apiHints: apiHints.map(redact),
     capabilities: [...new Set(capabilities)],
     purposeHints,
     note: 'PII/secrets redacted before transmission',

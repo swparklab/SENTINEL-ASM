@@ -18,6 +18,9 @@ export class EgressViolation extends Error {
   }
 }
 
+/** 자동 비파괴 점검에서 허용되는 읽기전용 메서드. 이외(쓰기/상태변경)는 가드가 하드 차단한다. */
+const READONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 export class EgressGuard {
   constructor(
     private readonly allowlist: string[],
@@ -237,9 +240,21 @@ export class EgressGuard {
   /** allowlist 검증을 거친 HTTP 요청 (비파괴, 기본 GET). */
   async httpGet(
     url: string,
-    opts: { timeoutMs?: number; method?: string; headers?: Record<string, string>; body?: string } = {},
+    opts: { timeoutMs?: number; method?: string; headers?: Record<string, string>; body?: string; allowStateChange?: boolean } = {},
   ): Promise<{ ok: boolean; status: number; headers: Record<string, string>; body: string } | null> {
     this.assertAllowed(url);
+    // 비파괴 불변식을 단일 egress 초크포인트에서 구조적으로 강제한다(방어심도).
+    // 자동 스캐너는 allowStateChange 를 전달하지 않으므로 GET/HEAD/OPTIONS·무바디만 발신 가능하다.
+    // 상태변경이 필요한 수동 점검(pentest)만 자체 승인(active) 후 명시적으로 allowStateChange:true 를 넘긴다.
+    const method = (opts.method ?? 'GET').toUpperCase();
+    if (!opts.allowStateChange && (!READONLY_METHODS.has(method) || opts.body !== undefined)) {
+      audit({
+        tenantId: this.ctx.tenantId, action: 'egress.method_block', target: url, outcome: 'deny',
+        reason: `비파괴 위반 차단: method=${method}${opts.body !== undefined ? '+body' : ''}`,
+        meta: { jobId: this.ctx.jobId, method },
+      });
+      throw new EgressViolation(url);
+    }
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 6000);
     try {

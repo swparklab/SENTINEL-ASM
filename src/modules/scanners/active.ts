@@ -17,6 +17,7 @@
 import type { Finding } from '../../types.js';
 import type { ScanContext } from './types.js';
 import { mk } from './asm.js';
+import { analyzePii } from './apiexposure.js';
 
 type HttpResp = { ok: boolean; status: number; headers: Record<string, string>; body: string };
 
@@ -28,6 +29,9 @@ export async function runActiveConfirmation(
   ctx: ScanContext, base: string, host: string, root: HttpResp, baseStatus: number, baseBody: string,
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
+  // 방어심도: 게이트/오케스트레이터가 active⟹aggressive+4-eyes 를 보장하지만, 소비자 단에서도 강도를 재확인한다.
+  // (어떤 모듈이 ctx.active 를 읽든 aggressive 가 아니면 활성 침투를 절대 실행하지 않는다.)
+  if (ctx.intensity !== 'aggressive') { ctx.log('active: aggressive 강도가 아니어서 활성 검증 생략(방어심도)'); return findings; }
   const get = (url: string) => ctx.guard.httpGet(url, { timeoutMs: 7000 });
   const isSoft404 = (r: HttpResp | null): boolean =>
     !!r && baseStatus === 200 && r.status === 200 && similar(r.body, baseBody);
@@ -42,6 +46,10 @@ export async function runActiveConfirmation(
     if (sqliDone >= 3) break;
     const orig = await get(t.url(enc(t.orig)));
     if (!ok(orig)) continue;
+    // 베이스라인 안정성 게이트: 동일 입력을 2회 호출해 자기차분이 작을 때만(결정적 페이지) 차분을 신뢰한다.
+    // 타임스탬프·랜덤배너·CSRF 토큰 등 비결정적 본문에서의 boolean 오탐을 차단한다.
+    const orig2 = await get(t.url(enc(t.orig)));
+    if (!ok(orig2) || !similar(orig.body, orig2.body)) { sqliDone++; continue; }
     // 숫자 컨텍스트: AND 1=1 / AND 1=2
     const variants: { t: string; f: string; kind: string }[] = [
       { t: `${enc(t.orig)}%20AND%201%3D1`, f: `${enc(t.orig)}%20AND%201%3D2`, kind: '숫자' },
@@ -78,8 +86,8 @@ export async function runActiveConfirmation(
     const payload = `"'></x><${tok} q="${tok}"`;
     const r = await get(t.url(enc(payload)));
     if (!ok(r)) continue;
-    const rawTag = r.body.includes(`<${tok}`);          // 태그가 인코딩 없이 생성됨 = HTML 탈출
-    const rawAttr = r.body.includes(`'></x>`) || r.body.includes(`"'>`); // 속성/태그 경계 탈출
+    const rawTag = r.body.includes(`<${tok}`);            // 주입 토큰 태그가 인코딩 없이 생성됨 = HTML 탈출
+    const rawAttr = r.body.includes(`'></x><${tok}`);     // 토큰 앵커링 — 우연한 "'> 존재가 아닌 실제 미인코딩 반사만
     if (rawTag || rawAttr) {
       findings.push(mkActive('high', `[활성 확정] 반사형 XSS 확정 — 컨텍스트 이스케이프: ${t.param}`, host + t.path,
         `파라미터 '${t.param}' 의 특수문자(< > " ')가 인코딩 없이 응답에 반사되어 ${rawTag ? '새 HTML 태그가 생성' : 'HTML/속성 경계가 탈출'}됩니다. 반사형 XSS 가 확정되었습니다(안전 토큰만 사용, 실제 스크립트 실행 유도는 하지 않음).`,
@@ -92,7 +100,8 @@ export async function runActiveConfirmation(
   // ── (3) IDOR/BOLA 확정 — 인접 식별자 소량 읽기전용 열람 ──
   const idTargets = collectIdTargets(root.body, base).slice(0, 3);
   for (const t of idTargets) {
-    const seq = [t.val, t.val + 1, t.val + 2, Math.max(1, t.val - 1)].slice(0, 4);
+    // 식별자 표본 중복 제거(val===1 일 때 Math.max(1,val-1)=1 충돌로 중복 요청·distinct 손실 방지).
+    const seq = [...new Set([t.val, t.val + 1, t.val + 2, t.val + 3, Math.max(1, t.val - 1)])].slice(0, 4);
     const resps: { v: number; body: string }[] = [];
     for (const v of seq) {
       const r = await get(t.url(v));
@@ -104,11 +113,16 @@ export async function runActiveConfirmation(
     const lens = resps.map((x) => x.body.length);
     const sameTpl = resps.length >= 3 && Math.min(...lens) / Math.max(...lens) > 0.6;
     if (resps.length >= 3 && distinct >= 3 && sameTpl) {
-      findings.push(mkActive('high', `[활성 확정] IDOR/BOLA 확정 — 타 객체 무인증 열람: ${t.label}`, host,
-        `식별자 '${t.param}' 를 ${seq.join(', ')} 로 바꾸면 인증 없이 서로 다른 객체(${distinct}건)가 같은 형식으로 반환됩니다. 주소창 번호만 바꿔 타인의 리소스를 임의 열람할 수 있는 객체 수준 인가 부재가 확정되었습니다(읽기전용 열람으로만 확인).`,
-        `${t.param}=${seq.join('/')} → ${distinct}개 상이한 200(동일 템플릿)`,
+      // PII 가 실제 포함될 때만 'firm/high'(타인 개인정보 열람 확정). 그 외(공개 콘텐츠 가능)는 'tentative/medium' 단서.
+      const piiHit = resps.some((x) => analyzePii(x.body, undefined).total > 0);
+      findings.push(mkActive(piiHit ? 'high' : 'medium',
+        `[활성 확정] IDOR/BOLA ${piiHit ? '확정 — 타 객체 무인증 개인정보 열람' : '단서 — 객체 분기 관측'}: ${t.label}`, host,
+        piiHit
+          ? `식별자 '${t.param}' 를 ${seq.join(', ')} 로 바꾸면 인증 없이 서로 다른 객체가 개인정보를 포함해 반환됩니다. 주소창 번호만 바꿔 타인의 개인정보를 열람할 수 있는 객체 수준 인가 부재가 확정되었습니다(읽기전용 열람으로만 확인).`
+          : `식별자 '${t.param}' 를 ${seq.join(', ')} 로 바꾸면 인증 없이 서로 다른 객체(${distinct}건)가 같은 형식으로 반환됩니다. 객체 수준 인가 부재 단서이나 PII 미검출이라 공개 콘텐츠일 수 있어 검증이 필요합니다.`,
+        `${t.param}=${seq.join('/')} → ${distinct}개 상이한 200(동일 템플릿)${piiHit ? ', PII 포함' : ''}`,
         '객체 접근마다 요청자의 소유/권한을 서버측에서 검증하고, 추측 가능한 순번 대신 비순차 식별자(UUID)/간접참조를 사용하십시오.',
-        'A01:2021', 'CWE-639', 'firm', REF_IDOR));
+        'A01:2021', 'CWE-639', piiHit ? 'firm' : 'tentative', REF_IDOR));
     }
   }
 
@@ -173,7 +187,8 @@ function collectIdTargets(body: string, base: string): { param: string; val: num
   const seen = new Set<string>();
   for (const m of body.matchAll(/(?:href|src|action)\s*=\s*["']([^"']+)["']/gi)) {
     const raw = m[1]!;
-    const pm = /[?&](id|uid|userid|user|account|order|orderid|no|seq|num|pid|doc|idx)=(\d{1,9})\b/i.exec(raw);
+    // 객체 귀속성이 강한 식별자 파라미터만(no/seq/num/idx/page 류 공개 게시판·페이지네이션 순번 제외 — 오탐 억제).
+    const pm = /[?&](id|uid|userid|user_id|user|account|account_id|accountid|order|orderid|order_id|member|member_id|profile|customer)=(\d{1,9})\b/i.exec(raw);
     if (!pm) continue;
     const param = pm[1]!; const val = Number(pm[2]!);
     if (seen.has(param) || !(val >= 1 && val < 1e9)) continue;

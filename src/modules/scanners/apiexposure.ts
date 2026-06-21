@@ -82,10 +82,7 @@ export async function scanApiExposure(p: ApiExposureInput): Promise<Finding[]> {
 
   // A-1) OpenAPI/Swagger 명세 — 공개 시 finding + 실제 경로 인벤토리 추출
   const specEndpoints = new Set<string>();
-  let specProbes = 0;
-  for (const sp of SPEC_PATHS) {
-    if (specProbes >= SPEC_PATHS.length) break;
-    specProbes++;
+  for (const sp of SPEC_PATHS) {                          // SPEC_PATHS 자체가 경계(고정 13개) — 별도 캡 불필요.
     const r = await get(base + sp);
     if (!r || r.status !== 200 || !r.body) continue;
     const spec = parseJson(r.body);
@@ -140,9 +137,10 @@ export async function scanApiExposure(p: ApiExposureInput): Promise<Finding[]> {
     const records = recordCount(parsed);
     const ct = (r.headers['content-type'] || '').split(';')[0] || '?';
 
-    // 강한 PII 신호: 검증된 주민/카드, 또는 복수 이메일/전화, 또는 레코드 다수가 PII 보유.
-    const strong = a.rrn || a.card || a.emails.size >= 2 || a.phones.size >= 2
-      || (records >= 2 && (a.emails.size >= 1 || a.phones.size >= 1));
+    // 강한 PII 신호(critical 승격): 검증된 주민/카드, 또는 "레코드 배열(≥2건)에 PII 가 다수(≥2 distinct) 귀속"될 때만.
+    // (레코드 다수 + 이메일/전화 1건은 푸터 연락처 1개일 수 있어 critical 로 단정하지 않는다.)
+    const strong = a.rrn || a.card || (records >= 2 && (a.emails.size >= 2 || a.phones.size >= 2));
+    const multi = a.emails.size >= 2 || a.phones.size >= 2;   // 레코드 배열 아닌 단일 응답의 PII 다수(records<2)
     const single = a.emails.size === 1 || a.phones.size === 1;
 
     if (strong) {
@@ -161,14 +159,22 @@ export async function scanApiExposure(p: ApiExposureInput): Promise<Finding[]> {
         (authNotEnforced ? ' | 익명+무효토큰 동일 PII 반환(인증 미강제)' : ''),
         '데이터 API 전 구간에 인증·객체/필드 수준 인가를 서버측에서 강제하고, 응답은 요청자가 권한을 가진 필드만(최소수집·최소노출) 직렬화하십시오. 대량 조회는 레이트리밋·페이지네이션·감사로깅으로 통제하고, 노출된 개인정보는 즉시 차단·통지·재발급 절차를 가동하십시오.',
         'A01:2021', 'CWE-359', conf, REF_PII));
-    } else if (single && records >= 1) {
+    } else if (multi) {
       reportedEndpoints.add(path);
       findings.push(make('high',
-        `비인가 API 개인정보 노출 가능성: ${path}`, host + path,
-        `데이터 API(${path})가 인증 없이 개인정보로 보이는 값(${piiDetail(a)})을 반환합니다. 의도된 공개 데이터인지, 인가가 누락된 것인지 확인이 필요합니다.`,
+        `비인가 API 개인정보 노출 가능성(다수): ${path}`, host + path,
+        `데이터 API(${path})가 인증 없이 개인정보로 보이는 값 다수(${piiDetail(a)})를 단일 응답으로 반환합니다. 레코드 배열이 아니어서 대량 유출로 단정하긴 어려우나 공개 의도인지 인가 누락인지 확인이 필요합니다.`,
         `status=200, content-type=${ct}, records≈${records}, ${piiDetail(a)}; sample=${a.sample}`,
         '엔드포인트가 비공개 데이터를 다룬다면 인증·인가를 강제하고 개인정보 필드를 응답에서 제거/마스킹하십시오.',
-        'A01:2021', 'CWE-359', 'firm', REF_PII));
+        'A01:2021', 'CWE-359', 'tentative', REF_PII));
+    } else if (single && records >= 1) {
+      reportedEndpoints.add(path);
+      findings.push(make('medium',
+        `비인가 API 개인정보 값 노출 가능성: ${path}`, host + path,
+        `데이터 API(${path})가 인증 없이 개인정보로 보이는 값 1건(${piiDetail(a)})을 반환합니다. 공개 연락처(support 등)일 수 있어, 비공개 데이터인지 인가 누락인지 확인이 필요합니다.`,
+        `status=200, content-type=${ct}, records≈${records}, ${piiDetail(a)}; sample=${a.sample}`,
+        '엔드포인트가 비공개 데이터를 다룬다면 인증·인가를 강제하고 개인정보 필드를 응답에서 제거/마스킹하십시오.',
+        'A01:2021', 'CWE-359', 'tentative', REF_PII));
     } else if (a.sensitiveKeys.size >= 2 && records >= 3) {
       reportedEndpoints.add(path);
       findings.push(make('medium',
@@ -209,7 +215,8 @@ export async function scanApiExposure(p: ApiExposureInput): Promise<Finding[]> {
                                                          // 구조가 ~동일해 fuzzy similar 로는 오판되므로 정확 일치로만 제외.
       const a1 = analyzePii(r1.body, p1);
       const a2 = analyzePii(r2.body, p2);
-      const pii = a1.total > 0 || a2.total > 0;
+      // critical 은 양쪽 객체 모두 PII 를 보유할 때만(서로 다른 소유자 귀속이 드러남). 한쪽만 PII 면 아래 tentative 단서로.
+      const pii = a1.total > 0 && a2.total > 0;
       if (pii) {
         findings.push(make('critical',
           `객체 수준 인가 누락(BOLA)로 타인 개인정보 열람: ${t.label}`, host + t.label,

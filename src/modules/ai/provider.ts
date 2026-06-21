@@ -44,16 +44,33 @@ export async function aiJson<T = unknown>(opts: AiCallOpts): Promise<T | null> {
 }
 
 export function extractJson<T>(raw: string): T | null {
-  let s = raw.trim();
-  // ```json ... ``` 펜스 제거
+  const s = raw.trim();
+  // 1) 그대로 파싱 시도(가장 흔한 정상 케이스)
+  try { return JSON.parse(s) as T; } catch { /* fall through */ }
+  // 2) ```json ... ``` 펜스 안쪽 시도
   const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(s);
-  if (fence && fence[1]) s = fence[1].trim();
-  // 첫 { 또는 [ 부터 마지막 } 또는 ] 까지 슬라이스 (앞뒤 잡텍스트 제거)
-  const first = Math.min(...['{', '['].map((c) => { const i = s.indexOf(c); return i === -1 ? Infinity : i; }));
-  const lastObj = s.lastIndexOf('}'); const lastArr = s.lastIndexOf(']');
-  const last = Math.max(lastObj, lastArr);
-  if (Number.isFinite(first) && last > first) s = s.slice(first, last + 1);
-  try { return JSON.parse(s) as T; } catch { return null; }
+  if (fence && fence[1]) { try { return JSON.parse(fence[1].trim()) as T; } catch { /* fall through */ } }
+  // 3) 첫 여는 괄호부터 깊이 추적으로 "첫 완전한 JSON 값"만 분리(뒤따르는 산문의 stray 괄호에 영향받지 않음).
+  const candidate = sliceFirstJson(fence && fence[1] ? fence[1] : s);
+  if (candidate) { try { return JSON.parse(candidate) as T; } catch { /* */ } }
+  return null;
+}
+
+/** 문자열·이스케이프를 인지한 균형 괄호 스캔으로 첫 완전한 JSON 객체/배열을 잘라낸다. */
+function sliceFirstJson(s: string): string | null {
+  let start = -1; let open = '';
+  for (let i = 0; i < s.length; i++) { const c = s[i]!; if (c === '{' || c === '[') { start = i; open = c; break; } }
+  if (start === -1) return null;
+  const close = open === '{' ? '}' : ']';
+  let depth = 0; let inStr = false; let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i]!;
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === open) depth++;
+    else if (c === close) { depth--; if (depth === 0) return s.slice(start, i + 1); }
+  }
+  return null;
 }
 
 async function callAnthropic(opts: AiCallOpts, signal: AbortSignal): Promise<string | null> {
