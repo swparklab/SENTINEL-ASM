@@ -9,6 +9,7 @@ import type { Finding } from '../../types.js';
 import type { Scanner, ScanContext } from './types.js';
 import { mk } from './asm.js';
 import { runActiveConfirmation } from './active.js';
+import { runLlmScan } from './llm.js';
 
 export const dastScanner: Scanner = {
   module: 'dast',
@@ -533,6 +534,13 @@ export const dastScanner: Scanner = {
           mr, 'meta refresh 대상이 사용자 입력으로 제어되지 않도록 하십시오.'),
           owasp: 'A01:2021', cwe: 'CWE-601', confidence: 'tentative' });
       }
+    }
+
+    // OWASP LLM Top 10 (2025) — LLM/AI 앱 표면 비파괴 점검(헬퍼 내부 신호 게이트로 무관 사이트는 즉시 생략).
+    try {
+      findings.push(...await runLlmScan(ctx, base, ctx.asset.value, root, baseStatus, baseBody));
+    } catch (e) {
+      ctx.log(`dast: LLM 점검 오류 — ${(e as Error).message}`);
     }
 
     // 활성(침투) 검증 — 게이트에서 aggressive + 4-eyes 통과 시에만 true. 취약점을 실제 트리거해 확정(비파괴 한정).

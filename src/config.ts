@@ -48,4 +48,19 @@ export const config = {
     timeoutMs: Number(process.env.SENTINEL_AI_TIMEOUT_MS ?? 30_000),
     maxTokens: Number(process.env.SENTINEL_AI_MAX_TOKENS ?? 2048),
   },
+
+  /**
+   * 위협 인텔(CTI/IoC) 연동 (설계 §4.3) — STIX2.1/TAXII2.1 또는 단순 IoC 피드를 "소비(consume)"만 한다.
+   * 발견된 지표(IP/도메인/CNAME)를 known-bad 와 대조해 enrich 한다. 외부 CTI 인프라 호출(대상 미발신).
+   * 미설정 시에도 데모 지표 세트(RFC5737/RFC2606 예약대역)로 파이프라인이 동작하며 매칭은 'tentative·데모'로 표기.
+   */
+  cti: {
+    taxiiUrl: process.env.SENTINEL_CTI_TAXII_URL ?? '',
+    apiRoot: process.env.SENTINEL_CTI_TAXII_API_ROOT ?? '',
+    collection: process.env.SENTINEL_CTI_TAXII_COLLECTION ?? '',
+    token: process.env.SENTINEL_CTI_TAXII_TOKEN ?? '',
+    feedUrls: (process.env.SENTINEL_CTI_FEED_URLS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+    enableDemoIndicators: (process.env.SENTINEL_CTI_DEMO ?? 'true') !== 'false',
+    timeoutMs: Number(process.env.SENTINEL_CTI_TIMEOUT_MS ?? 8000),
+  },
 } as const;

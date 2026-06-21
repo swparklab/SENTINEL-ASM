@@ -102,7 +102,7 @@ const CLASSES: Klass[] = [
   },
   {
     // 알려진 취약점/구식 컴포넌트 (CVE/SBOM)
-    match: (f) => f.module === 'cve' || /구식|버전|컴포넌트|CVE-/.test(f.title),
+    match: (f) => f.module === 'cve' || /구식|버전|컴포넌트|CVE-|위협 인텔|IoC|known-bad/.test(f.title),
     cwe: 'CWE-1104', owasp: T10.A06,
     references: ['https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/', 'https://cwe.mitre.org/data/definitions/1104.html'],
     frameworks: [
@@ -147,7 +147,7 @@ const CLASSES: Klass[] = [
   },
   {
     // 전송계층/암호화 (TLS/HSTS/인증서/쿠키 Secure/암호스위트/PFS)
-    match: (f) => /TLS|HSTS|인증서|HTTPS|암호|프로토콜|secure|쿠키|PFS|키교환|cipher|서명알고리즘|RSA 키|혼합 콘텐츠|평문/i.test(f.title),
+    match: (f) => /TLS|HSTS|인증서|HTTPS|암호|프로토콜|secure|쿠키|PFS|키교환|cipher|서명알고리즘|RSA 키|혼합 콘텐츠|평문|API 키|키\(시크릿\)|키 노출|시크릿/i.test(f.title),
     cwe: 'CWE-319', owasp: T10.A02,
     references: ['https://owasp.org/Top10/A02_2021-Cryptographic_Failures/', 'https://cwe.mitre.org/data/definitions/319.html'],
     frameworks: [
