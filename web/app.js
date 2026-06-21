@@ -448,6 +448,59 @@ function Scans({ user, toast, onOpenReport }) {
     </div>`;
 }
 
+// ── AI Pentest Report 인텔리전스 (ATT&CK · 예상 피해 · Attack Path · 재현) ──
+function fmtWon(n) {
+  if (n >= 100000000) return `약 ${(n / 100000000).toFixed(1)}억원`;
+  if (n >= 10000) return `약 ${Math.round(n / 10000).toLocaleString()}만원`;
+  return `${(n || 0).toLocaleString()}원`;
+}
+function IntelPanel({ jobId }) {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => { api('GET', `/api/scans/${jobId}/intelligence`).then((x) => setD(x.json?.intelligence)).catch((e) => setErr(String(e))); }, [jobId]);
+  if (err) return null;
+  if (!d) return html`<div class="panel"><div class="muted">공격 시나리오 분석 로딩 중…</div></div>`;
+  const loss = d.loss || {};
+  return html`<div class="panel">
+    <h3>🎯 공격 시나리오 인텔리전스 <span class="muted" style=${{ fontSize: 12, fontWeight: 400 }}>(MITRE ATT&CK · 예상 피해 · 공격 경로 · 재현 — 분석 전용, 비파괴)</span></h3>
+
+    ${loss.likely > 0 && html`<div class="card" style=${{ marginBottom: 12, borderLeft: '3px solid #e0533d' }}>
+      <div class="k">예상 피해금액 <span class="muted">(FAIR 기반 추정 · 참고용)</span></div>
+      <div class="v" style=${{ color: '#e0533d' }}>${fmtWon(loss.likely)}</div>
+      <div class="muted" style=${{ fontSize: 12 }}>레인지: ${fmtWon(loss.min)} ~ ${fmtWon(loss.max)}${loss.regulatory > 0 ? ` · 규제 과징금 추정 포함 ${fmtWon(loss.regulatory)}` : ''}</div>
+      ${(loss.breakdown || []).map((b, i) => html`<div key=${i} class="muted" style=${{ fontSize: 11, marginTop: 4 }}>· ${b}</div>`)}
+    </div>`}
+
+    ${(d.paths || []).map((p, i) => html`<div key=${i} style=${{ marginBottom: 12 }}>
+      <div style=${{ fontWeight: 600, marginBottom: 6 }}>🔗 ${p.name} <${Sev} s=${p.severity} /></div>
+      <div style=${{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+        ${(p.stages || []).map((s, j) => html`<span key=${j} style=${{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <span class="pill" title=${s.finding}>${s.phase.split('(')[0]}${s.technique ? ` · ${s.technique.split(' ')[0]}` : ''}</span>
+          ${j < p.stages.length - 1 ? html`<span class="muted">→</span>` : ''}
+        </span>`)}
+      </div>
+      <div class="muted" style=${{ fontSize: 12, marginTop: 6 }}>${p.narrative}</div>
+    </div>`)}
+
+    ${(d.attack || []).length > 0 && html`<div style=${{ marginBottom: 12 }}>
+      <div style=${{ fontWeight: 600, marginBottom: 6 }}>MITRE ATT&CK 기법 매핑</div>
+      <div style=${{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        ${d.attack.map((a) => html`<span key=${a.id} class="pill" title=${`${a.tactic} — ${a.name}`}>${a.id} ${a.name}${a.count > 1 ? ` ×${a.count}` : ''}</span>`)}
+      </div>
+    </div>`}
+
+    ${(d.repro || []).length > 0 && html`<details>
+      <summary style=${{ cursor: 'pointer', fontWeight: 600 }}>재현 절차 (상위 ${d.repro.length}건 · 비파괴)</summary>
+      ${d.repro.map((rp, i) => html`<div key=${i} style=${{ marginTop: 8 }}>
+        <div style=${{ fontWeight: 600, fontSize: 13 }}>${rp.title}</div>
+        <ol style=${{ margin: '4px 0', paddingLeft: 20, fontSize: 12, lineHeight: 1.7 }}>
+          ${(rp.steps || []).map((st, j) => html`<li key=${j} class="muted">${st}</li>`)}
+        </ol>
+      </div>`)}
+    </details>`}
+  </div>`;
+}
+
 // ───────────────────────── 리포트 ─────────────────────────
 function Report({ jobId, onBack }) {
   const [r, setR] = useState(null);
@@ -471,6 +524,7 @@ function Report({ jobId, onBack }) {
           ${r.delta && html`<div class="muted" style=${{ marginTop: 8 }}>직전 대비: 해소 ${r.delta.resolved} · 신규 ${r.delta.introduced} · 점수변화 ${r.delta.scoreChange >= 0 ? '+' : ''}${r.delta.scoreChange}</div>`}</div>
       </div>
     </div>
+    <${IntelPanel} jobId=${jobId} />
     <div class="panel">
       <h3>점검 방법론 및 범위</h3>
       <ul style=${{ margin: 0, paddingLeft: 18, lineHeight: 1.9 }}>
