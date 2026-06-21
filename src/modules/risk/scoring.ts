@@ -15,7 +15,7 @@ const CRITICALITY_WEIGHT: Record<Asset['businessCriticality'], number> = {
 
 /** 노출도: 외부에서 직접 도달 가능한 표면일수록 가중 (설계 §5.1 exposure). */
 function exposureWeight(f: Finding): number {
-  if (f.module === 'asm' || f.module === 'dast') return 1.15; // 외부 노출/동적 표면
+  if (f.module === 'asm' || f.module === 'dast' || f.module === 'access' || f.module === 'ai') return 1.15; // 외부 노출/동적·접근통제·AI 적응형 표면
   if (f.module === 'config') return 1.05;
   return 1.0;
 }

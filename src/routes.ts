@@ -14,6 +14,9 @@ import { issueOwnershipChallenge, verifyOwnership } from './modules/authorizatio
 import { revokeConsent, currentConsentStatus, computeEgressAllowlist } from './modules/authorizationGate/gate.js';
 import { orchestrator } from './modules/orchestrator/orchestrator.js';
 import { scanSoftware, scanSoftwareProject, scanDomainQuick, parseTarget } from './modules/quick/quick.js';
+import { authorizeTarget, runProbe, runPlaybook, recordPentestJob, PLAYBOOKS, type PlaybookId } from './modules/pentest/pentest.js';
+import { EgressViolation } from './modules/scanners/egress.js';
+import { aiStatus, analyzeFindings } from './modules/ai/index.js';
 import { runSast } from './modules/scanners/sast.js';
 import { checkHibpDomain } from './modules/scanners/cloud.js';
 import { buildReport, reportToMarkdown, reportToHtml } from './modules/reports/report.js';
@@ -193,8 +196,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     api.post('/api/scans', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
       const v = validate(z.object({
         assetId: z.string(),
-        modules: z.array(z.enum(['asm', 'config', 'cve', 'dast'])).min(1),
+        modules: z.array(z.enum(['asm', 'config', 'cve', 'dast', 'access', 'ai'])).min(1),
         intensity: z.enum(['passive', 'standard', 'aggressive']).default('standard'),
+        /** 활성(침투) 검증 — 취약점 실제 확정. 게이트에서 aggressive + 4-eyes 서면승인 통과 시에만 동작(비파괴 한정). */
+        active: z.boolean().default(false),
       }), req.body);
       if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
       const asset = repos.assets.get(v.data.assetId, req.auth!.tenantId);
@@ -203,7 +208,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         .find((c) => c.assetId === asset.id && currentConsentStatus(c) === 'active');
       const job = orchestrator.enqueue({
         tenantId: req.auth!.tenantId, asset, consent,
-        modules: v.data.modules, intensity: v.data.intensity, actor: req.auth!.email,
+        modules: v.data.modules, intensity: v.data.intensity, active: v.data.active, actor: req.auth!.email,
       });
       // 게이트 거부도 정상 응답(작업 객체에 사유 포함) — 클라이언트가 사유를 표시
       return reply.code(job.status === 'rejected' ? 422 : 202).send(job);
@@ -259,7 +264,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         target: z.string().min(1),
         attested: z.boolean(),
         deep: z.boolean().default(false),
-        modules: z.array(z.enum(['asm', 'config', 'cve', 'dast'])).min(1).default(['asm', 'config', 'cve', 'dast']),
+        modules: z.array(z.enum(['asm', 'config', 'cve', 'dast', 'access', 'ai'])).min(1).default(['asm', 'config', 'cve', 'dast', 'access', 'ai']),
       }), req.body);
       if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
       if (!v.data.attested) {
@@ -282,7 +287,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         sessionCookie: z.string().optional(),
         /** 추가 요청 헤더 (예: {"Authorization":"Bearer token"}) */
         headers: z.record(z.string()).optional(),
-        modules: z.array(z.enum(['asm', 'config', 'cve', 'dast'])).default(['config', 'dast']),
+        modules: z.array(z.enum(['asm', 'config', 'cve', 'dast', 'access', 'ai'])).default(['config', 'dast', 'access', 'ai']),
       }), req.body);
       if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
       if (!v.data.attested) return reply.code(403).send({ error: 'attestation_required', message: '점검 권한 보유 확인이 필요합니다.' });
@@ -327,6 +332,79 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(202).send({ jobs: results });
     });
 
+    // ───────────── 수동 침투 점검 (Pentest) — 해킹 테스터 직접 테스트 ─────────────
+    // 사용 가능한 Playbook 목록 (읽기)
+    api.get('/api/pentest/playbooks', { preHandler: requirePermission('scan:read') }, async () => ({ playbooks: PLAYBOOKS }));
+
+    // Repeater — 인가된 대상에 단일 요청을 보내고 원시 응답을 관찰
+    api.post('/api/pentest/probe', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
+      const v = validate(z.object({
+        target: z.string().min(1),
+        attested: z.boolean(),
+        method: z.string().default('GET'),
+        path: z.string().default('/'),
+        headers: z.record(z.string()).optional(),
+        body: z.string().optional(),
+        active: z.boolean().default(false),
+      }), req.body);
+      if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
+      if (!v.data.attested) return reply.code(403).send({ error: 'attestation_required', message: '점검 권한 보유 확인(attestation)이 필요합니다.' });
+      try {
+        const at = authorizeTarget(req.auth!.tenantId, req.auth!.email, v.data.target, v.data.attested);
+        const result = await runProbe(at, v.data, { tenantId: req.auth!.tenantId, actor: req.auth!.email });
+        return reply.code(200).send({ host: at.host, ...result });
+      } catch (e) {
+        if (e instanceof EgressViolation) return reply.code(403).send({ error: 'egress_blocked', message: e.message });
+        return reply.code(400).send({ error: 'bad_request', message: String(e instanceof Error ? e.message : e) });
+      }
+    });
+
+    // Playbook — 표적 유도 점검을 실행하고 결과를 점검 작업으로 기록
+    api.post('/api/pentest/run', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
+      const v = validate(z.object({
+        target: z.string().min(1),
+        attested: z.boolean(),
+        playbook: z.enum(['path-fuzz', 'auth-bypass', 'idor', 'sqli-probe', 'xss-probe', 'traversal-probe', 'method-audit']),
+        path: z.string().optional(),
+        param: z.string().optional(),
+      }), req.body);
+      if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
+      if (!v.data.attested) return reply.code(403).send({ error: 'attestation_required', message: '점검 권한 보유 확인(attestation)이 필요합니다.' });
+      try {
+        const at = authorizeTarget(req.auth!.tenantId, req.auth!.email, v.data.target, v.data.attested);
+        const findings = await runPlaybook(at, { playbook: v.data.playbook as PlaybookId, path: v.data.path, param: v.data.param }, { tenantId: req.auth!.tenantId, actor: req.auth!.email });
+        const meta = PLAYBOOKS.find((p) => p.id === v.data.playbook);
+        const job = recordPentestJob(at, meta?.name ?? v.data.playbook, findings, req.auth!.email);
+        return reply.code(200).send({ host: at.host, playbook: v.data.playbook, jobId: job.id, findings: job.findings });
+      } catch (e) {
+        if (e instanceof EgressViolation) return reply.code(403).send({ error: 'egress_blocked', message: e.message });
+        return reply.code(400).send({ error: 'bad_request', message: String(e instanceof Error ? e.message : e) });
+      }
+    });
+
+    // ───────────── AI 보안 분석 엔진 ─────────────
+    // AI 구성 상태 (키 설정 여부·모델). 키 미설정이어도 200 으로 비활성 상태를 알린다.
+    api.get('/api/ai/status', { preHandler: requirePermission('scan:read') }, async () => aiStatus());
+
+    // AI 종합 분석 — 완료된 점검 작업의 발견을 받아 경영진 요약·우선순위·공격경로·오탐가능성을 생성.
+    // 대상으로 패킷을 보내지 않으며(발견 메타데이터만 분석), PII 는 전송 전 마스킹된다.
+    api.post('/api/ai/analyze', { preHandler: requirePermission('scan:read') }, async (req, reply) => {
+      const v = validate(z.object({ jobId: z.string().min(1) }), req.body);
+      if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
+      const job = repos.scanJobs.get(v.data.jobId, req.auth!.tenantId);
+      if (!job) return reply.code(404).send({ error: 'not_found', message: '점검 작업 없음' });
+      const status = aiStatus();
+      if (!status.configured) return reply.code(503).send({ error: 'ai_unconfigured', message: 'AI 미구성 — SENTINEL_AI_API_KEY(또는 ANTHROPIC_API_KEY) 설정 후 사용 가능합니다.', status });
+      try {
+        const analysis = await analyzeFindings(job.findings ?? []);
+        if (!analysis) return reply.code(502).send({ error: 'ai_no_response', message: 'AI 응답을 받지 못했습니다(모델 오류/타임아웃).' });
+        audit({ tenantId: job.tenantId, actor: req.auth!.email, action: 'ai.analyze', target: job.assetId, outcome: 'info', meta: { jobId: job.id, findings: job.findings?.length ?? 0 } });
+        return reply.send({ jobId: job.id, model: status.model, analysis });
+      } catch (e) {
+        return reply.code(500).send({ error: 'ai_error', message: String(e instanceof Error ? e.message : e) });
+      }
+    });
+
     // 점검 취소 (UI kill-switch) — 큐 대기/실행 중 작업 중단
     api.post('/api/scans/:id/cancel', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
       const job = repos.scanJobs.get((req.params as any).id, req.auth!.tenantId);
@@ -349,7 +427,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         .find((cn) => cn.assetId === asset.id && currentConsentStatus(cn) === 'active');
       const job = orchestrator.enqueue({
         tenantId: req.auth!.tenantId, asset, consent,
-        modules: prev.modules, intensity: prev.intensity, deep: prev.depth === 'deep', actor: req.auth!.email,
+        modules: prev.modules, intensity: prev.intensity, deep: prev.depth === 'deep', active: prev.active === true, actor: req.auth!.email,
       });
       return reply.code(job.status === 'rejected' ? 422 : 202).send(job);
     });

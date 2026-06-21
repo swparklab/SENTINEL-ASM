@@ -12,6 +12,8 @@ export interface ScanContext {
   jobId: string;
   /** 심층 점검 여부 — true 면 정밀·전수 점검(시간 소요) */
   deep: boolean;
+  /** 활성(침투) 검증 모드 — 취약점을 실제 트리거해 확정(비파괴 한정). 게이트에서 aggressive+4-eyes 강제됨. */
+  active: boolean;
   /** 게이트가 통과시킨 점검 대상 (자산 + 발견 서브도메인) */
   targets: string[];
   log: (msg: string) => void;
@@ -27,7 +29,7 @@ export const DEEP_PORTS = [
 ];
 
 export interface Scanner {
-  module: 'asm' | 'config' | 'cve' | 'dast';
+  module: 'asm' | 'config' | 'cve' | 'dast' | 'access' | 'ai';
   /** 이 모듈이 요구하는 최소 강도 */
   minIntensity: ScanIntensity;
   run(ctx: ScanContext): Promise<Finding[]>;

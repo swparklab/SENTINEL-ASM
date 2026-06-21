@@ -164,7 +164,7 @@ export interface QuickDomainResult { job: ScanJob; asset: Asset; normalizedHost:
  */
 export function scanDomainQuick(
   tenantId: string, actor: string, target: string, attested: boolean,
-  modules: ScanJob['modules'] = ['asm', 'config', 'cve', 'dast'],
+  modules: ScanJob['modules'] = ['asm', 'config', 'cve', 'dast', 'access', 'ai'],
   deep = false,
 ): QuickDomainResult {
   if (!attested) throw new Error('점검 권한 보유 확인(attestation)이 필요합니다.');

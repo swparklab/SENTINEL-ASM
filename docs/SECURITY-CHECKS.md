@@ -95,6 +95,83 @@
 | 사용자 열거(타이밍 차이) | ⚠ (통계적·능동) |
 | 문서 메타데이터(EXIF/문서 속성) | 🔌 (문서 수집·파싱) |
 
+## 7-A. 접근통제·자동수집 차단 (access 모듈, OWASP A01·A04) — **신규 ✅**
+> "수작업 기반 해킹"에 대한 방어 상태를 비파괴(GET/HEAD/OPTIONS)로 점검한다. 익스플로잇·로그인·쓰기를 수행하지 않으며, 발견은 모두 "취약 가능성의 안전 지표"다. soft-404 베이스라이닝으로 SPA 오탐을 억제한다.
+
+| 항목 | 상태 |
+|---|---|
+| 허가되지 않은 경로 필터링(관리/내부/디버그 경로가 인증 없이 200) | ✅ (CWE-862) |
+| 접근통제 우회 — 경로 표기 변형(대문자/슬래시/`..;/`/`/./`) | ✅ (CWE-639) |
+| 접근통제 우회 — 헤더 변조(X-Original-URL/X-Rewrite-URL/X-Forwarded-For 등) | ✅ 심층 (CWE-290) |
+| 순차 객체참조(IDOR) — 주소창 번호 ±1 열람 단서 | ✅ 심층 (CWE-639, tentative) |
+| 권한 파라미터 변조(`?admin=true`/`role=admin`) 반응 | ✅ 심층 (CWE-639, tentative) |
+| 디버그 파라미터(`?debug=true`) 정보 노출 | ✅ 심층 (→ A03 매핑) |
+| AI 크롤러 차단 여부(robots.txt: GPTBot/ClaudeBot/CCBot/Google-Extended 등) | ✅ (RFC 9309) |
+| 봇 User-Agent 필터링 능동 확인(GPTBot/ClaudeBot/python-requests/Scrapy) | ✅ |
+| 봇 매니지먼트·레이트리밋 부재 단서(Cloudflare/DataDome/PerimeterX 등) | ✅ 심층 |
+
+## 7-A2. 비인가 API 개인정보·과다 노출 (apiexposure, OWASP API1/API3 · A01) — **신규 ✅**
+> 실제 유출 사고 클래스("API 요청 시 개인정보를 무분별하게 제공하는 구조") 대응. 관리자 페이지가 아니라 **인증 없이 호출되는 데이터 API 가 PII 를 그대로 반환**하는 표면을 발견·분석한다. 비파괴(GET/HEAD/OPTIONS, 식별자 2~3개 표본, 브루트포스 금지). PII 가 본문에서 실제 검증된 경우에만 firm/confirmed 로 승격한다.
+
+| 항목 | 상태 |
+|---|---|
+| API 엔드포인트 발견 — 컬렉션 워드리스트(users/members/applicants/submissions/evaluations…) | ✅ |
+| API 엔드포인트 발견 — OpenAPI/Swagger 명세 파싱(공개 명세 노출 + 실제 경로 인벤토리) | ✅ (CWE-200) |
+| API 엔드포인트 발견 — 홈/번들 JS 내 `/api/..` 마이닝 | ✅ 심층 |
+| 응답 본문 JSON PII 워킹 — 이메일·휴대전화·주민번호(체크섬)·카드(Luhn) | ✅ (CWE-359) |
+| 한국형 민감 필드명 — 이메일·연락처·이름·주소·생년월일·점수·평가·심사평·등급·합격·선정·지원자/회원 | ✅ |
+| **인증 없이 개인정보 대량 노출** — 비인가 API 가 PII 반환 | ✅ critical (CWE-359, firm) → 개인정보보호법/GDPR 매핑 |
+| 인증 미강제 차분 — 익명 vs 무효 토큰 동일 PII 반환 확증 | ✅ |
+| 과다 노출(Excessive Data Exposure) — 인증 없이 민감 필드/대량 레코드 반환 | ✅ (CWE-213) |
+| **객체 수준 인가(BOLA)** — `{id}` 인접값으로 타인 개인정보 열람 | ✅ 심층 critical (CWE-639, firm) |
+| 정상 보호 확인(401/403 응답 데이터 API) — 긍정 신호 로깅 | ✅ |
+| 무해 사이트 무오탐(`/api/config` 등 공개 비-PII) | ✅ (검증됨) |
+
+## 7-A3. AI 보안 분석 엔진 (ai 모듈, 설계 §5.3) — **신규 ✅**
+> 사이트에 맞춘 적응형 점검. **LLM 은 "계획·분석"만** 하고, 실제 발신은 기존 비파괴 엔진(EgressGuard, GET/HEAD/OPTIONS)이 수행한다 — "AI 가 제안했다"는 사실만으로는 발견이 아니며, 응답에서 구체 신호가 관측될 때만 Finding 을 만든다. 키(`SENTINEL_AI_API_KEY`/`ANTHROPIC_API_KEY`) 미설정 시 전체 플랫폼은 그대로 동작하고 AI 만 비활성(graceful degradation). 외부 LLM 으로 나가는 데이터는 fingerprint 단계에서 PII·시크릿을 마스킹·제거한다.
+
+| 항목 | 상태 |
+|---|---|
+| 사이트 핑거프린트(용도·기술·경로·폼·API 힌트) — **PII/시크릿 마스킹 후 전송** | ✅ |
+| LLM 기반 사이트 특화 점검 제안(데이터 모델 추론 → 워드리스트에 없는 경로 발굴) | ✅ |
+| 안전 필터 — GET/HEAD/OPTIONS·동일출처·파괴적 의도 거부(이중 안전장치) | ✅ |
+| 비파괴 검증 — AI 제안 경로를 가드로 호출, PII/인가누락/정보노출 **구체 신호 관측 시에만** 발견 | ✅ |
+| 인증 없이 개인정보 노출(사이트 특화 API) | ✅ critical (CWE-359) |
+| 비인가 관리/내부 영역, 디렉터리 인덱싱, 민감 파일/설정 노출 | ✅ (CWE-862/200/548) |
+| AI 종합 분석 — 경영진 요약·우선순위·공격경로·오탐 가능성·핵심 권고(`POST /api/ai/analyze`) | ✅ |
+| 제공자 — Anthropic Messages / OpenAI 호환(`SENTINEL_AI_PROVIDER`·`SENTINEL_AI_MODEL`) | ✅ |
+| 키 미설정 시 무중단·무오탐(graceful) | ✅ (검증됨) |
+
+## 7-A4. 활성(침투) 검증 모드 (active, 설계 §4.5 aggressive) — **신규 ✅**
+> "마커만 관측"을 넘어 취약점을 **실제로 트리거해 확정**한다. **비파괴 한계는 유지** — 데이터 변경·삭제, DoS/플러딩, 무차별 대입, 실 악성 페이로드는 수행하지 않으며, 확정은 모두 읽기전용 차분/반사/소량 열거다(기법당 요청 수 제한, 브루트포스 아님). **게이트: `active` 는 `aggressive` 강도 + 4-eyes 서면승인(`aggressiveApprovedBy`)을 통과한 경우에만 동작** — 자기확인(self-attested) 빠른점검 경로로는 절대 켤 수 없다.
+
+| 항목 | 상태 |
+|---|---|
+| Boolean 기반 SQLi 확정 — `AND 1=1`(참) vs `AND 1=2`(거짓) 응답 차분(데이터 추출·변경 없음) | ✅ firm (CWE-89) |
+| 반사형 XSS 확정 — HTML/속성 컨텍스트 이스케이프(안전 토큰, 실행 유도 없음) | ✅ firm (CWE-79) |
+| IDOR/BOLA 확정 — 객체참조 자원의 인접 식별자 소량(≤4) 읽기전용 열람 | ✅ firm (CWE-639) |
+| 권한 게이트 — active ⟹ aggressive ⟹ 4-eyes 강제(미충족 시 거부) | ✅ (검증됨) |
+| active=false 시 활성 확정 완전 차단 | ✅ (검증됨) |
+| **제외(옵션으로도 미구현)**: 데이터 변경·삭제 · DoS · 무차별 대입 · 실 악성 페이로드 | ⛔ 안전·법적 한계 |
+
+## 7-B. 수동 침투 점검 (Pentest 모듈) — **신규 ✅**
+> 해킹 테스터가 직접 대상을 테스트해 취약점을 찾는 기능. 안전장치는 그대로 강제된다 — (1) attestation 으로 검증된 자산·활성 동의 범위 내에서만, (2) egress allowlist 하드 차단(범위 밖 호스트로 패킷 미발신), (3) 전 요청 감사로그 기록. `scan:create` 권한 필요(viewer 차단). 엔드포인트: `GET /api/pentest/playbooks`, `POST /api/pentest/probe`, `POST /api/pentest/run`.
+
+| 기능 | 상태 |
+|---|---|
+| Repeater(요청 워크벤치) — 메서드·경로·헤더·바디 직접 구성, 원시 응답 관찰 | ✅ |
+| 포트·스킴 보존(`IP:포트`, `http(s)://`) | ✅ |
+| 상태변경 메서드(POST/PUT/PATCH/DELETE) 명시 active 승인 게이트 | ✅ |
+| 자동 관찰 노트(반사·보안헤더 누락·서버지문·오류 시그니처) | ✅ |
+| Playbook: 관리/민감 경로 탐색(path-fuzz) | ✅ |
+| Playbook: 접근통제 우회(auth-bypass, 경로·헤더 변형) | ✅ (soft-404 오탐 억제) |
+| Playbook: 순차 객체참조(idor) 스윕 | ✅ |
+| Playbook: SQL 오류 인젝션 표면(sqli-probe, 단일따옴표) | ✅ (비파괴) |
+| Playbook: 반사형 XSS 표면(xss-probe, 안전 마커) | ✅ (비파괴) |
+| Playbook: 경로 트래버설/LFI(traversal-probe) | ✅ (비파괴) |
+| Playbook: 허용 HTTP 메서드 감사(method-audit) | ✅ |
+| 결과를 점검 작업으로 기록(위험산정·컴플라이언스 매핑·리포트 연동) | ✅ |
+
 ## 8. 평판·유출·외부 그림자 — **전부 🔌 (외부 데이터 필수)**
 | 항목 | 상태 |
 |---|---|

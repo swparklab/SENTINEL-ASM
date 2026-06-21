@@ -310,6 +310,321 @@ export const asmScanner: Scanner = {
       }
     }
 
+    // ───── 확장 점검 ─────────────────────────────────────────────────────
+    // (비파괴: GET/HEAD/OPTIONS·connect·읽기전용 cmd·핸드셰이크·리졸버 질의만)
+
+    if (ctx.asset.type === 'domain' && ctx.deep) {
+      // [DNS-1] CDS/CDNSKEY 게시 — DNSSEC 키 롤오버/위임 자동화 신호 (RFC7344)
+      try {
+        const cds = await dohQuery(host, 'CDS');
+        const cdnskey = await dohQuery(host, 'CDNSKEY');
+        const cdsAns = (cds?.Answer || []).filter((r: any) => r.type === 59);
+        const cdnAns = (cdnskey?.Answer || []).filter((r: any) => r.type === 60);
+        if (cdsAns.length || cdnAns.length) {
+          // CDS 0 0 0 0 = DNSSEC 제거 신호 → 상위 DS 삭제 요청. 의도치 않으면 위험.
+          const deleteSignal = cdsAns.some((r: any) => /(^|\s)0\s+0\s+0\s+0\s*$/.test((r.data || '').trim()));
+          findings.push({ ...mk('asm', deleteSignal ? 'medium' : 'info',
+            deleteSignal ? 'CDS/CDNSKEY DNSSEC 제거 신호(0 0 0 0) 게시' : 'CDS/CDNSKEY 자동 위임 레코드 게시', host,
+            deleteSignal
+              ? 'CDS "0 0 0 0" 는 상위 존에 DS 삭제(=DNSSEC 비활성)를 요청하는 신호입니다. 의도치 않은 게시면 DNSSEC 가 해제되어 캐시 포이즈닝에 노출됩니다.'
+              : 'CDS/CDNSKEY 로 상위 위임의 자동 키 롤오버가 동작합니다. 키 관리 위생을 확인하십시오.',
+            `CDS=${cdsAns.length} CDNSKEY=${cdnAns.length}`,
+            deleteSignal ? 'DNSSEC 유지가 의도라면 CDS 0 0 0 0 게시를 즉시 제거하십시오.' : '키 롤오버 절차와 상위 DS 동기화를 정기 점검하십시오.'),
+            owasp: 'A05:2021', cwe: 'CWE-345', confidence: 'firm',
+            references: ['https://datatracker.ietf.org/doc/html/rfc7344'] });
+        }
+      } catch { /* DoH 불가 */ }
+
+      // [DNS-2] DNAME 레코드 — 서브트리 리다이렉션(설정 오류·범위 오염 시 위험)
+      try {
+        const dn = await dohQuery(host, 'DNAME');
+        const dnAns = (dn?.Answer || []).filter((r: any) => r.type === 39);
+        if (dnAns.length) findings.push({ ...mk('asm', 'low', 'DNAME 서브트리 리다이렉션 설정', host,
+          'DNAME 은 전체 서브도메인 트리를 다른 도메인으로 매핑합니다. 매핑 대상이 미점유/오설정이면 광범위 트래픽 오리다이렉트·탈취 위험이 있습니다.',
+          dnAns.map((r: any) => r.data).slice(0, 4).join('\n'),
+          'DNAME 매핑 대상의 점유·정합성을 확인하고 불필요한 서브트리 리다이렉션을 제거하십시오.'),
+          owasp: 'A05:2021', cwe: 'CWE-350', confidence: 'firm' });
+      } catch { /* */ }
+
+      // [DNS-3] NSEC/NSEC3 존재 — 영역 워킹(zone enumeration) 가능 힌트 (질의만)
+      // DNSSEC-OK(do=1) 질의로 Authority 섹션의 NSEC/NSEC3 를 보존해야 탐지가 동작한다.
+      try {
+        const nsecProbe = await dohQuery(`zzq8x-nope-${Math.random().toString(36).slice(2, 8)}.${host}`, 'A', true);
+        const auth = (nsecProbe?.Authority || []) as { type?: number; data?: string }[];
+        const hasNsec = auth.some((r) => r.type === 47);
+        const hasNsec3 = auth.some((r) => r.type === 50);
+        if (hasNsec) findings.push({ ...mk('asm', 'low', 'DNSSEC NSEC 사용 — 영역 워킹(전체 레코드 열거) 가능', host,
+          'NSEC 레코드는 부재 증명을 위해 다음 존재 이름을 평문 노출합니다. 공격자가 NSEC 체인을 따라가 영역 전체 레코드를 열거(zone walking)할 수 있습니다.',
+          'NSEC in Authority section', 'NSEC3(해시) 또는 NSEC3 화이트 라이즈/블랙 라이즈로 전환하여 영역 워킹을 차단하십시오.'),
+          owasp: 'A01:2021', cwe: 'CWE-200', confidence: 'firm',
+          references: ['https://datatracker.ietf.org/doc/html/rfc5155'] });
+        else if (hasNsec3) {
+          // NSEC3 RDATA presentation: "<hash-alg> <flags> <iterations> <salt> <next-hashed> [types...]"
+          // 예) "1 0 0 -"  → iterations = 3번째 필드. 첫 공백숫자(hash-alg)를 캡처하면 안 됨.
+          const n3 = auth.find((r) => r.type === 50);
+          const fields = (n3?.data || '').trim().split(/\s+/);
+          const iters = fields.length >= 3 && /^\d+$/.test(fields[2]!) ? Number(fields[2]) : null;
+          if (iters !== null && iters > 0) findings.push({ ...mk('asm', 'info', `NSEC3 반복(iterations=${iters}) — 0 권고`, host,
+            'NSEC3 반복 횟수가 0 보다 크면 검증 부하만 늘고 오프라인 사전공격 방어 효과는 미미합니다(RFC9276). iterations=0 이 권고됩니다.',
+            `NSEC3 iterations=${iters}`, 'NSEC3 iterations 를 0 으로 설정하십시오.'),
+            owasp: 'A05:2021', cwe: 'CWE-327', confidence: 'tentative',
+            references: ['https://datatracker.ietf.org/doc/html/rfc9276'] });
+        }
+      } catch { /* */ }
+
+      // [DNS-4] 추가 SRV 라벨 — 자동발견 표면(autodiscover/Teams/STUN 등)
+      const srvExtra: string[] = [];
+      for (const lbl of SRV_LABELS_EXT) {
+        const r = await ctx.guard.resolveSrv(`${lbl}.${host}`);
+        if (r.length && r[0]) srvExtra.push(`${lbl}→${r[0].name}:${r[0].port}`);
+      }
+      if (srvExtra.length) findings.push({ ...mk('asm', 'info', `추가 SRV 자동발견 라벨 노출 ${srvExtra.length}건`, host,
+        '협업/통신(STUN/TURN/SIP-TLS/MS Teams federation/CalDAV 등) SRV 가 노출되어 사용 중인 서비스·내부 토폴로지가 드러납니다.',
+        srvExtra.join('\n'), '불필요한 SRV 공개를 제한하고 내부 자동발견은 분할 DNS 로 분리하십시오.'),
+        owasp: 'A01:2021', cwe: 'CWE-200', confidence: 'firm' });
+
+      // [DNS-5] 추가 SaaS/공급망 검증 TXT 토큰 (기존 SAAS_TXT 외 신규 벤더)
+      const txtAll = await ctx.guard.resolveTxt(host);
+      const saasExtra = SAAS_TXT_EXT.filter(([k]) => txtAll.some((r) => r.toLowerCase().includes(k.toLowerCase()))).map(([, n]) => n);
+      if (saasExtra.length) findings.push({ ...mk('asm', 'info', `추가 SaaS/벤더 검증 토큰 ${saasExtra.length}건 — 공급망 표면`, host,
+        'TXT 의 추가 SaaS 검증 토큰으로 사용 중인 외부 SaaS(공급망)가 식별됩니다. 미사용 벤더 토큰은 공급망 공격면을 넓힙니다.',
+        saasExtra.join(', '), '미사용 검증 토큰 TXT 를 정리하고 활성 SaaS 만 유지하십시오.'),
+        owasp: 'A06:2021', cwe: 'CWE-200', confidence: 'firm' });
+
+      const mxForArc = await ctx.guard.resolveMx(host);
+      const hasMx = mxForArc.some((m) => m.exchange && m.exchange !== '.');
+
+      // [MAIL-1] DKIM ADSP/구식 정책 라벨(_adsp._domainkey) 노출 — 폐기된 메커니즘
+      if (hasMx) {
+        const adsp = (await ctx.guard.resolveTxt(`_adsp._domainkey.${host}`)).find((r) => /dkim=/i.test(r));
+        if (adsp) findings.push({ ...mk('asm', 'info', 'DKIM ADSP(_adsp) 폐기 메커니즘 게시', host,
+          'ADSP(RFC5617)는 폐기되었고 DMARC 로 대체되었습니다. 게시되어 있어도 효과가 없고 설정 노후 신호입니다.',
+          adsp.slice(0, 120), 'ADSP 레코드를 제거하고 DMARC 로 정책을 표현하십시오.'),
+          owasp: 'A05:2021', cwe: 'CWE-16', confidence: 'firm' });
+      }
+
+      // [MAIL-2] 추가 DKIM 셀렉터 — 벤더별 셀렉터 광범위 점검(기존 DKIM_SELECTORS 외)
+      if (hasMx) {
+        let extraDkimSel = '';
+        for (const sel of DKIM_SELECTORS_EXT) {
+          const rec = await ctx.guard.resolveTxt(`${sel}._domainkey.${host}`);
+          if (rec.some((r) => /v=DKIM1|p=/i.test(r))) { extraDkimSel = sel; break; }
+        }
+        if (extraDkimSel) findings.push({ ...mk('asm', 'info', `벤더 DKIM 셀렉터 노출: ${extraDkimSel}`, host,
+          `벤더 특화 DKIM 셀렉터(${extraDkimSel})가 발견되어 사용 중인 메일 발송 서비스가 식별됩니다.`,
+          `selector=${extraDkimSel}._domainkey`, '미사용 발송 서비스의 DKIM 셀렉터를 폐기하십시오.'),
+          owasp: 'A06:2021', cwe: 'CWE-200', confidence: 'firm' });
+      }
+
+      // [MAIL-3] DMARC ruf(포렌식 리포트) 외부 도메인 위임 — 민감정보 유출/외부 위임 위생
+      const dmarcRec = (await ctx.guard.resolveTxt(`_dmarc.${host}`)).find((r) => /v=dmarc1/i.test(r));
+      if (dmarcRec) {
+        const ruf = /ruf=([^;]+)/i.exec(dmarcRec);
+        if (ruf && ruf[1]) {
+          const rufDomains = [...ruf[1].matchAll(/mailto:[^@\s,]+@([^\s,;!]+)/gi)].map((m) => (m[1] || '').toLowerCase());
+          const external = rufDomains.filter((d) => d && d !== host && !d.endsWith('.' + host));
+          if (external.length) findings.push({ ...mk('asm', 'low', 'DMARC ruf(포렌식 리포트) 외부 도메인 위임', host,
+            'ruf 포렌식 리포트가 외부 도메인으로 전송됩니다. 포렌식 리포트에는 원문 메일 헤더/본문 일부가 포함될 수 있어 민감정보가 제3자에 노출될 수 있습니다(외부 수신처는 별도 권한 TXT 도 필요).',
+            `ruf→${external.slice(0, 4).join(', ')}`, 'ruf 수신처를 자사 도메인으로 제한하거나 ruf 사용 필요성을 재검토하십시오.'),
+            owasp: 'A01:2021', cwe: 'CWE-200', confidence: 'firm' });
+        }
+      }
+
+      // [MAIL-4] BIMI VMC(a= 태그/인증마크 인증서) 검증 — 로고 인증 완성도
+      const bimi = (await ctx.guard.resolveTxt(`default._bimi.${host}`)).find((r) => /v=bimi1/i.test(r));
+      if (bimi) {
+        const hasA = /(^|;)\s*a=/i.test(bimi);
+        const hasL = /(^|;)\s*l=\S/i.test(bimi);
+        const lNonHttps = hasL && !/(^|;)\s*l=https:\/\//i.test(bimi);
+        if (!hasA && hasL) findings.push({ ...mk('asm', 'info', 'BIMI VMC(a=) 미설정 — 인증마크 인증서 부재', host,
+          'BIMI 가 게시되었으나 VMC(Verified Mark Certificate, a= 태그)가 없어 주요 메일 클라이언트(Gmail/Apple)에서 로고가 표시되지 않습니다.',
+          bimi.slice(0, 140), '공인 VMC 를 발급받아 BIMI a= 태그에 게시하십시오.'),
+          owasp: 'A07:2021', cwe: 'CWE-295', confidence: 'firm' });
+        if (lNonHttps) findings.push({ ...mk('asm', 'low', 'BIMI 로고 URL 이 비-HTTPS', host,
+          'BIMI 로고(l=) 가 HTTPS 가 아니면 변조/혼합콘텐츠 위험이 있습니다.', bimi.slice(0, 140),
+          'BIMI l= 를 HTTPS SVG Tiny PS 로 게시하십시오.'),
+          owasp: 'A02:2021', cwe: 'CWE-319', confidence: 'firm' });
+      }
+
+      // [MAIL-5] MTA-STS DNS 레코드(_mta-sts TXT) 부재 — 정책 파일과 DNS 레코드 정합
+      if (hasMx) {
+        const mtaStsTxt = (await ctx.guard.resolveTxt(`_mta-sts.${host}`)).find((r) => /v=stsv1/i.test(r));
+        if (!mtaStsTxt) findings.push({ ...mk('asm', 'info', 'MTA-STS DNS 레코드(_mta-sts TXT) 미설정', host,
+          'MTA-STS 정책 파일이 있어도 _mta-sts TXT(id=) 가 없으면 발신 MTA 가 정책 갱신을 인지하지 못합니다.',
+          'no _mta-sts TXT', '_mta-sts.<도메인> 에 v=STSv1; id=... TXT 를 게시하십시오.'),
+          owasp: 'A05:2021', cwe: 'CWE-16', confidence: 'firm' });
+      }
+
+      // [TLS-1] 와일드카드 인증서 과범위 SAN — 단일 와일드카드가 다수 서브트리 커버
+      const tlsApex2 = await ctx.guard.tlsInspect(host, 443);
+      if (tlsApex2 && tlsApex2.san.length) {
+        const wildSan = tlsApex2.san.filter((s) => s.startsWith('*.'));
+        if (wildSan.length) {
+          const broad = wildSan.some((s) => (s.match(/\./g) || []).length <= 1); // *.com 류(과도)
+          findings.push({ ...mk('asm', broad ? 'medium' : 'low', `와일드카드 인증서 SAN ${wildSan.length}건 — 과범위 키 공유 위험`, host,
+            '와일드카드 인증서는 다수 호스트가 단일 개인키를 공유합니다. 한 호스트 침해 시 동일 키로 전체 서브도메인 위장이 가능합니다.',
+            `wildcard SAN=${wildSan.slice(0, 6).join(', ')}`,
+            '민감 서비스는 호스트별 전용 인증서를 사용하고 와일드카드 범위를 최소화하십시오.'),
+            owasp: 'A02:2021', cwe: 'CWE-295', confidence: 'firm',
+            references: ['https://owasp.org/www-project-web-security-testing-guide/'] });
+        }
+      }
+    }
+
+    // ── 능동 TLS 심화(443 핸드셰이크) — passive 제외, host 자산은 443 오픈 확인 ──
+    if (ctx.deep && (ctx.asset.type !== 'host' || (await ctx.guard.tcpProbe(host, 443)))) {
+      const t2 = await ctx.guard.tlsInspect(host, 443);
+      if (t2) {
+        // [TLS-2] 제거: t2.ocspUrl 존재만으로 무조건 발생하는 info 노이즈였고(공인 인증서는 대부분
+        //  AIA 에 OCSP URL 포함), Must-Staple 강제 여부를 핸드셰이크로 확정할 수 없어 실질 취약 신호가
+        //  아니라 메서드 한계를 토로하는 수준이므로 삭제.
+
+        // [TLS-3] SCT(CT) 부족 — CT 정책 미준수 신호
+        if (t2.sctCount === 0) findings.push({ ...mk('asm', 'info', 'SCT(인증서 투명성) 미포함', host,
+          '인증서에 SCT(서명된 인증서 타임스탬프)가 없어 CT 로그 게재가 확인되지 않습니다. 일부 클라이언트는 CT 미준수 인증서를 거부합니다.',
+          `sctCount=${t2.sctCount}`, 'CT 로그에 게재되고 SCT 가 포함된 인증서를 발급하십시오.'),
+          owasp: 'A02:2021', cwe: 'CWE-295', confidence: 'firm' });
+
+        // [TLS-4] CRIME(TLS 압축) 힌트 — TLS 1.2 이하 + 정적 RSA 협상 시 압축 위험 추정
+        // (압축 활성 직접 관측 메서드 없음 → 약한 cipher 매트릭스로 레거시 스택 추정, tentative)
+        const legacyKex = await ctx.guard.tlsWeakCipherAccepted(host, 'DES-CBC3-SHA:CAMELLIA@SECLEVEL=0', 443);
+        if (legacyKex) findings.push({ ...mk('asm', 'low', 'TLS 압축(CRIME)·레거시 스택 가능성', host,
+          '레거시 블록 암호(3DES/CAMELLIA CBC)가 협상되어 구형 TLS 스택일 가능성이 있습니다. 구형 스택은 TLS 압축(CRIME) 활성 위험이 있습니다.',
+          `negotiated=${legacyKex}`, 'TLS 압축을 비활성화하고 AEAD(GCM/ChaCha20) 전용으로 전환하십시오.'),
+          owasp: 'A02:2021', cwe: 'CWE-310', confidence: 'tentative' });
+
+        // [TLS-5] 약한 cipher 매트릭스 확대(기존 RC4/3DES/NULL/EXPORT/aNULL 외)
+        for (const [grp, cipher, cwe] of TLS_WEAK_CIPHERS_EXT) {
+          const c = await ctx.guard.tlsWeakCipherAccepted(host, cipher, 443);
+          if (c) findings.push({ ...mk('asm', 'medium', `약한 암호스위트 수용: ${grp}`, host,
+            `${grp} 계열 암호스위트가 수용되어 기밀성/무결성이 약화됩니다.`, `negotiated=${c}`,
+            `${grp} 를 비활성화하고 ECDHE + AEAD(AES-GCM/ChaCha20-Poly1305) 만 허용하십시오.`),
+            owasp: 'A02:2021', cwe, confidence: 'firm' });
+        }
+
+        // [TLS-6] 짧은 DH 그룹(1024bit 이하) — DHE 약화(Logjam 계열)
+        const weakDh = await ctx.guard.tlsWeakCipherAccepted(host, 'DHE@SECLEVEL=0:EDH@SECLEVEL=0', 443);
+        if (weakDh && /DHE/i.test(weakDh)) findings.push({ ...mk('asm', 'medium', 'DHE 키교환 수용 — 짧은 DH 파라미터 가능성(Logjam)', host,
+          'DHE 키교환이 수용됩니다. 1024bit 이하 DH 그룹이면 Logjam 다운그레이드/오프라인 공격에 취약합니다.',
+          `negotiated=${weakDh}`, 'DHE 를 ECDHE 로 교체하거나 2048bit 이상 DH 그룹만 사용하십시오.'),
+          owasp: 'A02:2021', cwe: 'CWE-326', confidence: 'tentative',
+          references: ['https://weakdh.org/'] });
+
+        // [TLS-7] 인증서 체인/AIA(issuer CA URL) — 중간 인증서 누락 시 신뢰 실패
+        if (!t2.selfSigned && t2.issuer && t2.subject && t2.issuer === t2.subject) {
+          findings.push({ ...mk('asm', 'low', '인증서 issuer=subject(중간 인증서/AIA 점검 필요)', host,
+            'issuer 와 subject 의 CN 이 동일해 체인 구성/중간 인증서 제공에 오류가 있을 수 있습니다(일부 클라이언트 신뢰 실패).',
+            `subject=${t2.subject} issuer=${t2.issuer}`, '서버가 전체 인증서 체인(중간 CA 포함)을 제시하도록 구성하십시오.'),
+            owasp: 'A02:2021', cwe: 'CWE-295', confidence: 'tentative' });
+        }
+      }
+    }
+
+    // ── 무인증 데이터스토어/관리 서비스 프로브 확대 (능동, deep) ──────────
+    if (ctx.deep) {
+      // open 포트 집합 재확인(스코프 안전): 위 open 변수는 passive 분기에서 채워지므로 재사용
+      const httpProbes: { port: number; path: string; sig: RegExp; name: string; sev: Finding['severity']; cwe: string; desc: string; remed: string }[] = [
+        { port: 2379, path: '/version', sig: /etcdserver|etcdcluster/i, name: 'etcd', sev: 'critical', cwe: 'CWE-306',
+          desc: 'etcd 가 인증 없이 /version 에 응답합니다(클러스터 키-값 저장소·시크릿 노출 표면).', remed: 'etcd 클라이언트/피어 TLS 인증을 적용하고 외부 노출을 차단하십시오.' },
+        { port: 8500, path: '/v1/agent/self', sig: /"Config"|"Member"|"NodeName"/, name: 'Consul', sev: 'critical', cwe: 'CWE-306',
+          desc: 'Consul agent 가 인증 없이 /v1/agent/self 에 응답합니다(서비스 메시·KV·ACL 우회 표면).', remed: 'Consul ACL(default deny)·TLS 를 적용하고 외부 노출을 차단하십시오.' },
+        { port: 8086, path: '/ping', sig: /^$/, name: 'InfluxDB', sev: 'high', cwe: 'CWE-306',
+          desc: 'InfluxDB 가 /ping(204) 에 응답합니다. 시계열 DB 가 외부에 노출되어 있습니다.', remed: 'InfluxDB 인증을 활성화하고 외부 노출을 차단하십시오.' },
+        { port: 9090, path: '/-/healthy', sig: /Prometheus( Server)? is Healthy|Healthy/i, name: 'Prometheus', sev: 'high', cwe: 'CWE-306',
+          desc: 'Prometheus 가 인증 없이 /-/healthy 에 응답합니다(메트릭·타깃·내부 토폴로지 노출).', remed: 'Prometheus 앞단에 인증 프록시를 두고 외부 노출을 차단하십시오.' },
+        { port: 3000, path: '/api/health', sig: /"database"\s*:\s*"ok"/i, name: 'Grafana', sev: 'medium', cwe: 'CWE-306',
+          desc: 'Grafana 가 /api/health 에 Grafana 고유 응답("database":"ok")으로 응답합니다. 익명 접근/기본 자격이면 대시보드·데이터소스가 노출됩니다.', remed: '익명 접근을 비활성화하고 강한 관리자 자격·외부 차단을 적용하십시오.' },
+        { port: 9000, path: '/api/system/status', sig: /"status"\s*:\s*"(UP|DOWN|STARTING|RESTARTING|DB_MIGRATION_(NEEDED|RUNNING))"/, name: 'SonarQube', sev: 'medium', cwe: 'CWE-306',
+          desc: 'SonarQube 가 상태 API 에 SonarQube 고유 status 값으로 응답합니다. 익명 접근 시 소스/이슈 메타가 노출될 수 있습니다.', remed: 'force authentication 을 활성화하고 외부 노출을 차단하십시오.' },
+      ];
+      for (const pr of httpProbes) {
+        if (!(await ctx.guard.tcpProbe(host, pr.port))) continue;
+        const r = await ctx.guard.httpGet(`http://${host}:${pr.port}${pr.path}`, { timeoutMs: 4000 });
+        if (!r) continue;
+        // InfluxDB /ping = 204 no content / Prometheus 200
+        const ok = (pr.port === 8086 ? (r.status === 204 || r.status === 200) : r.status === 200) && (pr.sig.source === '^$' ? true : pr.sig.test(r.body));
+        if (ok) findings.push({ ...mk('asm', pr.sev, `${pr.name} 무인증/노출 단서`, `${host}:${pr.port}`, pr.desc,
+          `status=${r.status} ${r.body.slice(0, 80).replace(/\s+/g, ' ')}`.trim(), pr.remed),
+          owasp: 'A05:2021', cwe: pr.cwe, confidence: 'firm' });
+      }
+
+      // 인증 필요(401/403) 이지만 노출 자체가 표면인 관리 콘솔
+      const authGated: { port: number; path: string; name: string; cwe: string }[] = [
+        { port: 15672, path: '/api/overview', name: 'RabbitMQ Management', cwe: 'CWE-306' },
+        { port: 8080, path: '/api/json', name: 'Jenkins', cwe: 'CWE-306' },
+        { port: 5601, path: '/api/status', name: 'Kibana', cwe: 'CWE-306' },
+      ];
+      for (const g of authGated) {
+        if (!(await ctx.guard.tcpProbe(host, g.port))) continue;
+        const r = await ctx.guard.httpGet(`http://${host}:${g.port}${g.path}`, { timeoutMs: 4000 });
+        if (!r) continue;
+        if (r.status === 200) {
+          findings.push({ ...mk('asm', 'critical', `${g.name} 무인증 노출`, `${host}:${g.port}`,
+            `${g.name} 관리 API 가 인증 없이 200 으로 응답합니다(관리 기능·메타 노출).`,
+            `status=200 ${r.body.slice(0, 80).replace(/\s+/g, ' ')}`.trim(),
+            '인증을 강제하고 관리 인터페이스를 사설망/배스천으로 제한하십시오.'),
+            owasp: 'A07:2021', cwe: g.cwe, confidence: 'firm' });
+        } else if (r.status === 401 || r.status === 403) {
+          findings.push({ ...mk('asm', 'medium', `${g.name} 관리 인터페이스 외부 노출(인증요구)`, `${host}:${g.port}`,
+            `${g.name} 관리 엔드포인트가 외부에 노출되어 있습니다(현재 인증 요구). 브루트포스·취약점 표적이 됩니다.`,
+            `status=${r.status}`, '관리 인터페이스를 사설망/VPN/허용목록으로 제한하십시오.'),
+            owasp: 'A05:2021', cwe: 'CWE-284', confidence: 'firm' });
+        }
+      }
+
+      // ZooKeeper 'envi' / Cassandra 배너 / Docker API / MongoDB HTTP / Kubelet
+      if (await ctx.guard.tcpProbe(host, 2181)) {
+        const r = await ctx.guard.cmdProbe(host, 2181, 'envi');
+        if (r && /Environment|zookeeper\.version|java\.version/i.test(r)) findings.push({ ...mk('asm', 'critical', 'ZooKeeper 무인증(4자 명령 envi) 노출', `${host}:2181`,
+          'ZooKeeper 가 인증 없이 4자 명령(envi)에 응답해 환경/버전이 노출됩니다(설정 탈취·코디네이션 조작 표면).',
+          r.slice(0, 100).replace(/\s+/g, ' ').trim(), '4lw 명령 화이트리스트를 제한하고 SASL 인증·외부 차단을 적용하십시오.'),
+          owasp: 'A05:2021', cwe: 'CWE-306', confidence: 'firm' });
+      }
+      if (await ctx.guard.tcpProbe(host, 2375)) {
+        const r = await ctx.guard.httpGet(`http://${host}:2375/version`, { timeoutMs: 4000 });
+        if (r && r.status === 200 && /"ApiVersion"|"GitCommit"|"Os"\s*:/.test(r.body)) findings.push({ ...mk('asm', 'critical', 'Docker Engine API 무인증(2375) 노출', `${host}:2375`,
+          '암호화·인증 없는 Docker API(2375)가 노출되어 컨테이너 생성/호스트 장악(RCE)으로 직결됩니다.',
+          r.body.slice(0, 100).replace(/\s+/g, ' '), 'TLS 상호인증(2376)으로 전환하거나 소켓을 외부에 노출하지 마십시오.'),
+          owasp: 'A05:2021', cwe: 'CWE-306', confidence: 'confirmed' });
+      }
+      if (await ctx.guard.tcpProbe(host, 27017)) {
+        // MongoDB HTTP 인터페이스(구버전 28017) 또는 27017 HTTP GET 시 안내 문자열
+        const r = await ctx.guard.httpGet(`http://${host}:27017/`, { timeoutMs: 4000 });
+        if (r && /It looks like you are trying to access MongoDB over HTTP/i.test(r.body)) findings.push({ ...mk('asm', 'high', 'MongoDB 포트(27017) 외부 노출 확인', `${host}:27017`,
+          'MongoDB 가 HTTP GET 에 드라이버 안내 문자열로 응답해 외부 노출이 확인됩니다. 인증 미설정 시 데이터 전체 노출 위험입니다.',
+          r.body.slice(0, 80), 'SCRAM 인증·bindIp 제한·방화벽으로 외부 노출을 차단하십시오.'),
+          owasp: 'A05:2021', cwe: 'CWE-306', confidence: 'firm' });
+      }
+      if (await ctx.guard.tcpProbe(host, 10250)) {
+        const r = await ctx.guard.httpGet(`https://${host}:10250/healthz`, { timeoutMs: 4000 });
+        if (r && r.status === 200 && /ok/i.test(r.body)) findings.push({ ...mk('asm', 'high', 'Kubelet API(10250) 외부 노출', `${host}:10250`,
+          'Kubelet 읽기/실행 API(10250)가 외부에 노출되어 있습니다. 익명 인가가 켜져 있으면 파드 실행/로그 접근(노드 장악) 표면이 됩니다.',
+          `healthz=${r.status}`, 'kubelet --anonymous-auth=false, --authorization-mode=Webhook 적용 및 외부 차단.'),
+          owasp: 'A05:2021', cwe: 'CWE-306', confidence: 'firm' });
+      }
+      // (Cassandra 9042 단순 포트 오픈 점검 제거: 9042 는 DANGEROUS_PORTS 에 포함되어
+      //  '민감 서비스 포트 외부 노출'(high)로 이미 보고되며, connect-only 만으로 인증 부재를
+      //  단정해 CWE-306/firm 을 중복 부여하는 것은 과장이므로 삭제. 인증 부재 시그니처가 없음.)
+    }
+
+    // ── 클라우드 스토리지 버킷 참조 노출 (대상 host 응답 본문에서 추출) ────
+    if (ctx.deep && ctx.asset.type !== 'host') {
+      const homeUrl = `https://${host}/`;
+      const page = await ctx.guard.httpGet(homeUrl, { timeoutMs: 6000 });
+      const bodyText = (page?.body || '') + ' ' + Object.values(page?.headers || {}).join(' ');
+      if (bodyText.trim()) {
+        const buckets = new Set<string>();
+        for (const re of BUCKET_URL_PATTERNS) {
+          for (const m of bodyText.matchAll(re)) { if (m[0]) buckets.add(m[0]); }
+        }
+        if (buckets.size) findings.push({ ...mk('asm', 'info', `클라우드 스토리지 버킷 참조 ${buckets.size}건 노출`, host,
+          '페이지/헤더에서 클라우드 스토리지 버킷 URL 이 참조됩니다. 버킷 권한이 공개/리스트 가능하면 데이터 노출 위험이 있습니다(버킷 자체는 외부 host 라 비파괴 점검 범위 밖).',
+          [...buckets].slice(0, 8).join('\n'), '참조된 버킷의 공개 ACL/리스팅을 비공개로 잠그고 서명 URL/오리진 접근만 허용하십시오.'),
+          owasp: 'A05:2021', cwe: 'CWE-732', confidence: 'tentative',
+          references: ['https://owasp.org/www-project-cloud-security/'] });
+      }
+    }
+
     return findings;
   },
 };
@@ -362,3 +677,79 @@ function matchServiceCve(product: string, version: string, target: string): Find
 }
 
 export const _now = now;
+
+// ───── 확장 점검용 상수/헬퍼 ─────────────────────────────────────────────
+
+/** 추가 SRV 자동발견 라벨 (기존 SRV_LABELS 와 비중복). */
+const SRV_LABELS_EXT = [
+  '_stun._udp', '_stuns._tcp', '_turn._udp', '_turns._tcp', '_sip._tls', '_sipfederationtls._tcp',
+  '_caldav._tcp', '_caldavs._tcp', '_carddav._tcp', '_carddavs._tcp',
+  '_minecraft._tcp', '_mongodb._tcp', '_etcd-server._tcp', '_etcd-client._tcp',
+  '_h323cs._tcp', '_diameter._tcp', '_pop3s._tcp', '_smtps._tcp', '_jmcp._tcp',
+];
+
+/** 추가 SaaS/벤더 검증 TXT 토큰 (기존 SAAS_TXT 와 비중복). [토큰부분문자열, 벤더명] */
+const SAAS_TXT_EXT: [string, string][] = [
+  ['apple-domain-verification', 'Apple Business'],
+  ['amazonses', 'Amazon SES'],
+  ['sendgrid', 'SendGrid'],
+  ['mailgun', 'Mailgun'],
+  ['pardot', 'Salesforce Pardot'],
+  ['salesforce', 'Salesforce'],
+  ['logmein-verification', 'LogMeIn'],
+  ['dropbox-domain-verification', 'Dropbox'],
+  ['cloudflare-verify', 'Cloudflare'],
+  ['globalsign-domain-verification', 'GlobalSign'],
+  ['onetrust', 'OneTrust'],
+  ['notion', 'Notion'],
+  ['miro-verification', 'Miro'],
+  ['workplace-domain-verification', 'Meta Workplace'],
+  ['citrix-verification-code', 'Citrix'],
+  ['webex', 'Cisco Webex'],
+  ['slack-domain-verification', 'Slack'],
+  ['shopify', 'Shopify'],
+  ['hubspot', 'HubSpot'],
+];
+
+/** 추가 DKIM 셀렉터 (기존 DKIM_SELECTORS 와 비중복) — 벤더 특화. */
+const DKIM_SELECTORS_EXT = [
+  'amazonses', 's1024', 'smtpapi', 'sig1', 'scph0', 'scph1', 'fm1', 'fm2', 'fm3',
+  'sm', 'smtp', 'protonmail', 'protonmail2', 'pic', 'zmail', 'mxvault', 'turbo-smtp',
+  'sparkpost', 'krs', 'cm', 'dkim1', 'dkim2', 'sib', 'litesrv',
+];
+
+/** 확대된 약한 암호스위트 매트릭스 (기존 RC4/3DES/NULL/EXPORT/aNULL/kRSA 와 비중복). */
+const TLS_WEAK_CIPHERS_EXT: [string, string, string][] = [
+  ['CBC-SHA1 (BEAST/Lucky13 계열)', 'AES128-SHA:AES256-SHA@SECLEVEL=0', 'CWE-326'],
+  ['CAMELLIA', 'CAMELLIA128-SHA:CAMELLIA256-SHA@SECLEVEL=0', 'CWE-327'],
+  ['SEED', 'SEED-SHA@SECLEVEL=0', 'CWE-327'],
+  ['IDEA', 'IDEA-CBC-SHA@SECLEVEL=0', 'CWE-327'],
+  ['DES (single)', 'DES-CBC-SHA@SECLEVEL=0', 'CWE-326'],
+  ['ARIA', 'ARIA128-GCM-SHA256:ARIA256-GCM-SHA384@SECLEVEL=0', 'CWE-327'],
+];
+
+/** 클라우드 스토리지 버킷 URL 참조 패턴 (응답 본문/헤더에서 추출). */
+const BUCKET_URL_PATTERNS: RegExp[] = [
+  /https?:\/\/[a-z0-9.-]+\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com/gi,
+  /https?:\/\/s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com\/[a-z0-9._-]+/gi,
+  /https?:\/\/[a-z0-9._-]+\.storage\.googleapis\.com/gi,
+  /https?:\/\/storage\.googleapis\.com\/[a-z0-9._-]+/gi,
+  /https?:\/\/[a-z0-9-]+\.blob\.core\.windows\.net/gi,
+  /https?:\/\/[a-z0-9-]+\.r2\.cloudflarestorage\.com/gi,
+  /https?:\/\/[a-z0-9.-]+\.(?:digitaloceanspaces|fra1\.cdn\.digitaloceanspaces)\.com/gi,
+];
+
+/**
+ * Cloudflare DoH(JSON) 질의 — 리졸버 질의(대상 패킷 미발신, 비파괴 공개 API).
+ * dnssec=true 면 DNSSEC-OK(do=1) 를 설정해 Authority 섹션의 NSEC/NSEC3/RRSIG 를 보존한다.
+ */
+async function dohQuery(name: string, type: string, dnssec = false): Promise<{ Answer?: unknown[]; Authority?: unknown[] } | null> {
+  try {
+    const doParam = dnssec ? '&do=true&cd=false' : '';
+    const res = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}${doParam}`, {
+      signal: AbortSignal.timeout(5000),
+      headers: { accept: 'application/dns-json' },
+    });
+    return await res.json() as { Answer?: unknown[]; Authority?: unknown[] };
+  } catch { return null; }
+}

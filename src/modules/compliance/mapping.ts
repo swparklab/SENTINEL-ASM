@@ -131,8 +131,8 @@ const CLASSES: Klass[] = [
     ],
   },
   {
-    // 관리/인증/접근통제
-    match: (f) => /관리|admin|wp-admin|manager|phpmyadmin|인증|세션|접근통제|인가/.test(f.title),
+    // 관리/인증/접근통제 (BAC: 인가 누락·우회·IDOR·권한 파라미터 변조 포함)
+    match: (f) => /관리|admin|wp-admin|manager|phpmyadmin|인증|세션|접근통제|인가|객체 참조|idor|권한 파라미터|허가되지 않은/i.test(f.title),
     cwe: 'CWE-284', owasp: T10.A01,
     references: ['https://owasp.org/Top10/A01_2021-Broken_Access_Control/', 'https://cwe.mitre.org/data/definitions/284.html'],
     frameworks: [
@@ -193,11 +193,22 @@ const CLICKJACK = { match: /클릭재킹|frame/i, cwe: 'CWE-1021' };
 const COOKIE = { match: /쿠키/, cwe: 'CWE-614' };
 const SPOOF = { match: /SPF|DMARC|스푸핑|CAA|DKIM/i, cwe: 'CWE-290' };
 
+/**
+ * OWASP 표기를 정준 라벨형으로 통일한다('A01:2021' → 'A01:2021 취약한 접근통제').
+ * 스캐너가 코드형, mapCompliance 폴백이 라벨형을 쓰던 불일치(커버리지 표 중복 집계)를 제거한다.
+ */
+function canonicalOwasp(owasp: string | undefined): string | undefined {
+  if (!owasp) return owasp;
+  const code = /^A\d{2}:2021/.exec(owasp)?.[0];
+  if (!code) return owasp;
+  return Object.values(T10).find((l) => l.startsWith(code)) ?? owasp;
+}
+
 /** 발견사항에 CWE·OWASP·참고자료·컴플라이언스 매핑을 부착한다. */
 export function mapCompliance(findings: Finding[]): Finding[] {
   for (const f of findings) {
     const k = CLASSES.find((c) => c.match(f)) ?? CLASSES[CLASSES.length - 1]!;
-    f.owasp = f.owasp ?? k.owasp;
+    f.owasp = canonicalOwasp(f.owasp ?? k.owasp);
     // 세부 CWE 보정
     let cwe = k.cwe;
     if (CORS_SPECIAL.match.test(f.title)) cwe = CORS_SPECIAL.cwe;
@@ -208,6 +219,12 @@ export function mapCompliance(findings: Finding[]): Finding[] {
     f.references = f.references ?? k.references;
     const map = new Map<string, ComplianceMapping>();
     for (const m of k.frameworks) map.set(`${m.framework}:${m.control}`, m);
+    // OWASP-Top10 통제를 발견의 실제 owasp 와 일치시킨다.
+    // (예: 비인가 API PII 노출은 f.owasp=A01 인데 PII 클래스가 A02 라벨을 부착하던 모순 제거.)
+    if (f.owasp) {
+      for (const key of [...map.keys()]) if (key.startsWith('OWASP-Top10:')) map.delete(key);
+      map.set(`OWASP-Top10:${f.owasp}`, { framework: 'OWASP-Top10', control: f.owasp });
+    }
     f.compliance = [...map.values()];
   }
   return findings;

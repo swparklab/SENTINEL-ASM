@@ -87,7 +87,7 @@ export interface Consent {
 }
 
 // ───────────────────────── 점검 작업 / 발견사항 (설계 §2.2, §4) ─────────────────────────
-export type ScanModule = 'asm' | 'config' | 'cve' | 'dast';
+export type ScanModule = 'asm' | 'config' | 'cve' | 'dast' | 'access' | 'ai';
 export type ScanStatus = 'queued' | 'running' | 'completed' | 'failed' | 'rejected' | 'aborted';
 
 export type Severity = 'info' | 'low' | 'medium' | 'high' | 'critical';
@@ -137,6 +137,8 @@ export interface ScanJob {
   intensity: ScanIntensity;
   /** 점검 깊이 — simple(간단·고신호) / deep(심층·정밀, 시간 소요) */
   depth?: 'simple' | 'deep';
+  /** 활성(침투) 검증 모드 — 취약점을 실제 트리거해 확정(비파괴 한정, aggressive+4-eyes 필수) */
+  active?: boolean;
   status: ScanStatus;
   /** 실시간 진행률 0–100 (오케스트레이터가 모듈 진행에 따라 갱신) */
   progress?: number;

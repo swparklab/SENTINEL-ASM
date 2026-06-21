@@ -46,6 +46,7 @@ const GLOSSARY = {
   DKIM: { title: 'DKIM (이메일 서명)', desc: '이메일에 디지털 서명을 달아 내용이 전송 중 변조되지 않았음을 증명하는 기술입니다.' },
   ASM: { title: 'ASM (외부 공격표면 관리)', desc: '외부에서 내 시스템에 접근 가능한 모든 진입점(서브도메인, 열린 포트, 공개 파일 등)을 찾아 목록화하는 과정입니다.' },
   DAST: { title: 'DAST (동적 웹 취약점 점검)', desc: '실제로 실행 중인 웹사이트에 안전한 테스트 요청을 보내 취약점을 찾는 방법입니다. 마치 윤리적 해커처럼 사이트를 두드려보는 것입니다.' },
+  ACCESS: { title: 'ACCESS (접근통제·자동수집 차단 점검)', desc: '로그인 없이 관리자 페이지가 열리는지, 주소창의 경로·번호를 바꿔치기해 남의 데이터·기능에 접근되는지(허가되지 않은 경로 필터링·우회), AI 봇의 자동 데이터 수집이 제대로 차단되는지를 점검합니다. "수작업 해킹"에 대한 방어 상태를 확인합니다.' },
   SAST: { title: 'SAST (소스코드 정적 분석)', desc: '소스 코드를 실행하지 않고 분석해서 보안 결함(SQL인젝션, 하드코딩된 비밀번호 등)을 찾는 방법입니다.' },
   SBOM: { title: 'SBOM (소프트웨어 부품 목록)', desc: '내 소프트웨어가 사용하는 외부 라이브러리·패키지 목록입니다. 어느 부품에 취약점이 있는지 파악하기 위해 필요합니다.' },
   ISMS: { title: 'ISMS-P (정보보호 관리체계)', desc: '한국 정보보호 인증 기준입니다. 기업이 정보를 안전하게 관리하고 있는지 평가하는 국내 표준입니다.' },
@@ -398,7 +399,7 @@ function Consents({ user, toast }) {
 function Scans({ user, toast, onOpenReport }) {
   const [jobs, setJobs] = useState([]);
   const [assets, setAssets] = useState([]);
-  const [form, setForm] = useState({ assetId: '', modules: ['asm', 'config', 'cve'], intensity: 'standard' });
+  const [form, setForm] = useState({ assetId: '', modules: ['asm', 'config', 'cve', 'access'], intensity: 'standard', active: false });
   const canScan = ['admin', 'scanner'].includes(user.role);
   const load = () => { api('GET', '/api/scans').then((r) => setJobs(r.json || [])); api('GET', '/api/assets').then((r) => setAssets(r.json || [])); };
   useEffect(() => { load(); const t = setInterval(load, 2500); return () => clearInterval(t); }, []);
@@ -423,10 +424,14 @@ function Scans({ user, toast, onOpenReport }) {
           <option value="passive">passive (소유권만)</option><option value="standard">standard (소유권+동의)</option><option value="aggressive">aggressive (+추가승인)</option></select></div>
         <div style=${{ flex: 2 }}><label>점검 모듈</label>
           <div style=${{ display: 'flex', gap: 6 }}>
-            ${['asm', 'config', 'cve', 'dast'].map((m) => html`<button key=${m} class=${form.modules.includes(m) ? 'primary' : ''} onClick=${() => toggleMod(m)}>${m.toUpperCase()}</button>`)}
+            ${['asm', 'config', 'cve', 'dast', 'access', 'ai'].map((m) => html`<button key=${m} class=${form.modules.includes(m) ? 'primary' : ''} onClick=${() => toggleMod(m)}>${m.toUpperCase()}</button>`)}
           </div></div>
         <div style=${{ flex: 0 }}><label>&nbsp;</label><button class="primary" onClick=${run} disabled=${!form.assetId || !form.modules.length}>점검 시작</button></div>
       </div>
+      <label class="attest" style=${{ marginTop: 10, borderColor: form.active ? '#dc2626' : undefined }}>
+        <input type="checkbox" checked=${form.active} onChange=${(e) => setForm((f) => ({ ...f, active: e.target.checked, intensity: e.target.checked ? 'aggressive' : f.intensity, modules: e.target.checked && !f.modules.includes('dast') ? [...f.modules, 'dast'] : f.modules }))} />
+        <span><b>🔴 활성(침투) 검증 모드</b> — 취약점을 실제 트리거해 확정합니다(Boolean SQLi 차분 · XSS 컨텍스트 이스케이프 · IDOR 무인증 열람). <b>aggressive 강도 + 4-eyes 서면승인</b> 동의가 있어야만 게이트를 통과합니다. <span class="muted">비파괴 한정 — 데이터 변경·삭제, DoS, 무차별 대입, 실 악성 페이로드는 수행하지 않습니다. (dast 모듈에서 동작)</span></span>
+      </label>
       <div class="muted" style=${{ marginTop: 8 }}>※ 검증되지 않은 자산·범위 밖 대상·윈도우 밖 요청은 게이트가 차단합니다.</div>
     </div>`}
     <div class="panel">
@@ -895,6 +900,50 @@ function ScoreBadge({ findings }) {
   </div>`;
 }
 
+// AI 보안 분석 — 사이트 맞춤 적응형 점검 결과의 경영진 요약·우선순위·공격경로·오탐 분석
+function AiInsights({ jobId }) {
+  const [status, setStatus] = useState(null);
+  const [analysis, setAnalysis] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => { api('GET', '/api/ai/status').then((x) => setStatus(x.json)).catch(() => {}); }, []);
+  const run = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const r = await api('POST', '/api/ai/analyze', { jobId });
+      if (r.ok && r.json?.analysis) setAnalysis(r.json.analysis);
+      else setErr(r.json?.message || 'AI 분석을 받지 못했습니다.');
+    } finally { setBusy(false); }
+  };
+  if (!status) return null;
+  return html`<div class="ai-insights">
+    <div class="ai-head">
+      <span class="ai-badge">🤖 AI 보안 분석 ${status.configured
+        ? html`<span class="ai-on">${status.model}</span>`
+        : html`<span class="ai-off">비활성</span>`}</span>
+      ${status.configured
+        ? html`<button class="primary" onClick=${run} disabled=${busy}>${busy ? '🤖 AI 분석 중…' : (analysis ? '↻ 다시 분석' : '🤖 AI 종합 분석')}</button>`
+        : html`<span class="muted" style=${{ fontSize: 12 }}>SENTINEL_AI_API_KEY(또는 ANTHROPIC_API_KEY) 환경변수 설정 시 활성화</span>`}
+    </div>
+    ${err && html`<div class="no" style=${{ fontSize: 13, marginTop: 8 }}>${err}</div>`}
+    ${analysis && html`<div class="ai-body">
+      <div class="ai-summary">${analysis.executiveSummary}</div>
+      ${analysis.blastRadius && html`<div class="ai-blast"><b>🔥 피해 범위</b><div>${analysis.blastRadius}</div></div>`}
+      ${analysis.prioritized?.length > 0 && html`<div class="ai-prio">
+        ${analysis.prioritized.map((p, i) => html`<div key=${i} class="ai-prio-item">
+          <div class="ai-prio-t">${p.severity && html`<${Sev} s=${p.severity} />`} <b>${p.title}</b></div>
+          ${p.businessImpact && html`<div class="ai-line"><span class="ai-k">사업영향</span> ${p.businessImpact}</div>`}
+          ${p.attackPath && html`<div class="ai-line"><span class="ai-k">공격경로</span> ${p.attackPath}</div>`}
+          ${p.falsePositiveRisk && html`<div class="ai-line"><span class="ai-k">오탐가능성</span> ${p.falsePositiveRisk}</div>`}
+          ${p.recommendation && html`<div class="ai-line"><span class="ai-k">조치</span> ${p.recommendation}</div>`}
+        </div>`)}
+      </div>`}
+      ${analysis.topRecommendations?.length > 0 && html`<div class="ai-recs"><b>✅ 핵심 권고</b><ul>${analysis.topRecommendations.map((r, i) => html`<li key=${i}>${r}</li>`)}</ul></div>`}
+      <div class="ai-foot muted">AI 는 점검 발견의 메타데이터만 분석합니다(대상 무발신·개인정보 마스킹). 결과는 참고용이며 전문가 검증을 권장합니다.</div>
+    </div>`}
+  </div>`;
+}
+
 // 발견사항 패널 — 심각도 필터 칩 + 검색 + 정렬 (UX)
 function FindingsPanel({ findings }) {
   const [active, setActive] = useState(new Set());      // 빈 set = 전체
@@ -984,7 +1033,7 @@ function Quick({ user, toast, onOpenReport }) {
     if (!authedAttested) return toast('점검 권한 보유 확인이 필요합니다.', true);
     setAuthedBusy(true); setAuthedJob(null);
     const headers = authedHeader ? { Authorization: authedHeader } : undefined;
-    const r = await api('POST', '/api/quick/authed', { target: authedTarget, attested: authedAttested, sessionCookie: authedCookie || undefined, headers, modules: ['config', 'dast'] });
+    const r = await api('POST', '/api/quick/authed', { target: authedTarget, attested: authedAttested, sessionCookie: authedCookie || undefined, headers, modules: ['config', 'dast', 'access'] });
     if (r.status !== 202) { setAuthedBusy(false); return toast(r.json?.message || '차단됨', true); }
     let job = r.json;
     const deadline = Date.now() + 120_000;
@@ -1009,6 +1058,52 @@ function Quick({ user, toast, onOpenReport }) {
     setIntelBusy(false);
     if (r.status === 200) { setIntelResult(r.json); toast(r.json.breached ? `⚠ ${r.json.count}건 유출 이력` : '유출 이력 없음'); }
     else toast(r.json?.message || '조회 실패', true);
+  };
+
+  // ── 수동 점검(Pentest) 상태 ──
+  const [ptTarget, setPtTarget] = useState('');
+  const [ptAttested, setPtAttested] = useState(false);
+  const [ptMode, setPtMode] = useState('repeater');     // 'repeater' | 'playbook'
+  // Repeater
+  const [ptMethod, setPtMethod] = useState('GET');
+  const [ptPath, setPtPath] = useState('/');
+  const [ptHeaders, setPtHeaders] = useState('');
+  const [ptBody, setPtBody] = useState('');
+  const [ptActive, setPtActive] = useState(false);
+  const [ptResp, setPtResp] = useState(null);
+  const [ptBusy, setPtBusy] = useState(false);
+  // Playbook
+  const [playbooks, setPlaybooks] = useState([]);
+  const [pbId, setPbId] = useState('path-fuzz');
+  const [pbPath, setPbPath] = useState('');
+  const [pbParam, setPbParam] = useState('');
+  const [pbResult, setPbResult] = useState(null);
+  const [pbBusy, setPbBusy] = useState(false);
+  useEffect(() => { api('GET', '/api/pentest/playbooks').then((r) => setPlaybooks(r.json?.playbooks || [])); }, []);
+
+  const statusClass = (s) => s >= 500 ? 'sev-critical' : (s === 401 || s === 403) ? 'sev-medium' : s >= 400 ? 'sev-high' : s >= 300 ? 'sev-low' : 'sev-info';
+  const parseHeaders = (txt) => { const h = {}; (txt || '').split('\n').forEach((l) => { const i = l.indexOf(':'); if (i > 0) h[l.slice(0, i).trim()] = l.slice(i + 1).trim(); }); return h; };
+  const curPb = () => playbooks.find((p) => p.id === pbId);
+  const sendRepeater = async () => {
+    if (!ptTarget.trim()) return toast('대상을 입력하세요.', true);
+    if (!ptAttested) return toast('점검 권한 보유 확인이 필요합니다.', true);
+    setPtBusy(true); setPtResp(null);
+    const r = await api('POST', '/api/pentest/probe', { target: ptTarget, attested: ptAttested, method: ptMethod, path: ptPath, headers: parseHeaders(ptHeaders), body: ptBody || undefined, active: ptActive });
+    setPtBusy(false);
+    if (r.status === 200) { setPtResp(r.json); toast(r.json.blocked ? '⛔ ' + r.json.blocked : `응답 ${r.json.response?.status ?? '-'}`, !!r.json.blocked); }
+    else toast(r.json?.message || '요청 실패', true);
+  };
+  const execPlaybook = async () => {
+    if (!ptTarget.trim()) return toast('대상을 입력하세요.', true);
+    if (!ptAttested) return toast('점검 권한 보유 확인이 필요합니다.', true);
+    const need = curPb()?.needs || [];
+    if (need.includes('path') && !pbPath.trim()) return toast('이 Playbook 은 경로(path)가 필요합니다.', true);
+    if (need.includes('param') && !pbParam.trim()) return toast('이 Playbook 은 파라미터(param)가 필요합니다.', true);
+    setPbBusy(true); setPbResult(null);
+    const r = await api('POST', '/api/pentest/run', { target: ptTarget, attested: ptAttested, playbook: pbId, path: pbPath || undefined, param: pbParam || undefined });
+    setPbBusy(false);
+    if (r.status === 200) { setPbResult(r.json); toast(`Playbook 완료 — ${r.json.findings?.length || 0}건`); }
+    else toast(r.json?.message || '실행 실패', true);
   };
 
   // 분석 가치가 있는 파일 필터
@@ -1201,6 +1296,7 @@ function Quick({ user, toast, onOpenReport }) {
         <button class=${tab === 'file' ? 'on' : ''} onClick=${() => setTab('file')}>📂 소프트웨어 프로젝트</button>
         <button class=${tab === 'sast' ? 'on' : ''} onClick=${() => setTab('sast')}>🔬 소스코드 SAST</button>
         <button class=${tab === 'authed' ? 'on' : ''} onClick=${() => setTab('authed')}>🔐 인증 세션 점검</button>
+        <button class=${tab === 'pentest' ? 'on' : ''} onClick=${() => setTab('pentest')}>🧪 수동 점검</button>
         <button class=${tab === 'intel' ? 'on' : ''} onClick=${() => setTab('intel')}>🕵️ 위협 인텔</button>
       </div>
 
@@ -1325,6 +1421,7 @@ function Quick({ user, toast, onOpenReport }) {
           </div>
           <div style=${{ margin: '12px 0' }}><${ScoreBadge} findings=${domainJob.findings} /></div>
           <${ActionCard} findings=${domainJob.findings} onOpenReport=${() => onOpenReport(domainJob.id)} />
+          <${AiInsights} jobId=${domainJob.id} />
           <${FindingsPanel} findings=${domainJob.findings} />`
         : html`<div class=${domainJob.status === 'rejected' ? 'no' : 'muted'}>
             ${domainJob.status === 'rejected' ? '🚫 이 대상은 점검할 수 없습니다.' : ''}
@@ -1376,6 +1473,83 @@ function Quick({ user, toast, onOpenReport }) {
           <div style=${{ margin:'10px 0' }}><${ScoreBadge} findings=${authedJob.findings} /></div>
           <${FindingsPanel} findings=${authedJob.findings} />
         </div>`}
+      `}
+
+      ${tab === 'pentest' && html`
+        <div class="filebox">
+          <h3 style=${{ margin: '0 0 6px' }}>🧪 수동 점검 (Pentest) — 해킹 테스터 직접 테스트</h3>
+          <div class="muted" style=${{ marginBottom: 10, fontSize: 13 }}>
+            권한 보유가 확인된(attested) 대상에 한해, 범위 밖 호스트로는 패킷이 나가지 않으며(egress 하드 차단) 모든 요청이 감사로그에 기록됩니다.
+            비파괴 원칙(GET·안전 마커)을 따르며, 상태변경 메서드(POST/PUT/PATCH/DELETE)는 별도 active 승인이 필요합니다.
+          </div>
+          <label>대상 (도메인 / URL / IP[:포트])</label>
+          <input value=${ptTarget} placeholder="https://app.example.com  또는  127.0.0.1:8080" onChange=${e => setPtTarget(e.target.value)} class="mono" />
+          <label class="attest" style=${{ marginTop: 10 }}>
+            <input type="checkbox" checked=${ptAttested} onChange=${e => setPtAttested(e.target.checked)} />
+            <span>본인이 소유하거나 점검 권한을 보유한 대상입니다. (필수)</span>
+          </label>
+          <div class="seg" style=${{ marginTop: 12 }}>
+            <button class=${ptMode === 'repeater' ? 'on' : ''} onClick=${() => setPtMode('repeater')}>📡 요청 워크벤치 (Repeater)</button>
+            <button class=${ptMode === 'playbook' ? 'on' : ''} onClick=${() => setPtMode('playbook')}>🎯 유도 공격 (Playbook)</button>
+          </div>
+
+          ${ptMode === 'repeater' && html`<div style=${{ marginTop: 12 }}>
+            <div class="row" style=${{ gap: 8 }}>
+              <div style=${{ flex: 0, minWidth: 120 }}><label>메서드</label>
+                <select value=${ptMethod} onChange=${e => setPtMethod(e.target.value)}>
+                  ${['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'].map(m => html`<option key=${m} value=${m}>${m}</option>`)}
+                </select></div>
+              <div style=${{ flex: 2 }}><label>경로 + 쿼리</label>
+                <input value=${ptPath} placeholder="/admin?id=1" onChange=${e => setPtPath(e.target.value)} class="mono" /></div>
+            </div>
+            <label>요청 헤더 (한 줄에 하나, "이름: 값")</label>
+            <textarea rows="3" value=${ptHeaders} placeholder=${'Authorization: Bearer ...\nX-Original-URL: /admin'} onChange=${e => setPtHeaders(e.target.value)} class="mono"></textarea>
+            ${['POST', 'PUT', 'PATCH', 'DELETE'].includes(ptMethod) && html`<div>
+              <label>요청 바디</label>
+              <textarea rows="3" value=${ptBody} onChange=${e => setPtBody(e.target.value)} class="mono"></textarea>
+              <label class="attest" style=${{ marginTop: 8 }}>
+                <input type="checkbox" checked=${ptActive} onChange=${e => setPtActive(e.target.checked)} />
+                <span>상태변경 메서드(${ptMethod}) 전송을 승인합니다. (active)</span>
+              </label>
+            </div>`}
+            <div style=${{ marginTop: 10, textAlign: 'center' }}>
+              <button class="primary" onClick=${sendRepeater} disabled=${ptBusy || !ptAttested}>${ptBusy ? '전송 중…' : '📡 요청 전송'}</button>
+            </div>
+            ${ptResp && html`<div class="panel" style=${{ marginTop: 12 }}>
+              ${ptResp.blocked
+        ? html`<div style=${{ fontWeight: 700, color: 'var(--crit)' }}>⛔ 차단됨</div><div class="muted" style=${{ marginTop: 4 }}>${ptResp.blocked}</div>`
+        : html`
+                  <div style=${{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span class="pill">${ptResp.request.method}</span>
+                    <span class="mono" style=${{ fontSize: 12 }}>${ptResp.request.url}</span>
+                    ${ptResp.response && html`<span class=${'badge ' + statusClass(ptResp.response.status)}>${ptResp.response.status} ${ptResp.response.statusText}</span>`}
+                    ${ptResp.response && html`<span class="muted" style=${{ fontSize: 12 }}>${ptResp.response.bytes.toLocaleString()}B · ${ptResp.response.timeMs}ms</span>`}
+                  </div>
+                  ${(ptResp.notes || []).length > 0 && html`<ul style=${{ margin: '8px 0', paddingLeft: 18, fontSize: 13 }}>${ptResp.notes.map((n, i) => html`<li key=${i}>${n}</li>`)}</ul>`}
+                  ${ptResp.response && html`<details style=${{ marginTop: 6 }}><summary class="muted">응답 헤더</summary><pre class="mono" style=${{ whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 160, overflow: 'auto' }}>${Object.entries(ptResp.response.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}</pre></details>`}
+                  ${ptResp.response && html`<details open style=${{ marginTop: 6 }}><summary class="muted">응답 본문${ptResp.response.truncated ? ' (앞 20KB)' : ''}</summary><pre class="mono" style=${{ whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 300, overflow: 'auto', background: 'var(--bg-soft)', padding: 8, borderRadius: 6 }}>${ptResp.response.body}</pre></details>`}
+                `}
+            </div>`}
+          </div>`}
+
+          ${ptMode === 'playbook' && html`<div style=${{ marginTop: 12 }}>
+            <label>Playbook</label>
+            <select value=${pbId} onChange=${e => { setPbId(e.target.value); setPbResult(null); }}>
+              ${playbooks.map(p => html`<option key=${p.id} value=${p.id}>${p.name}${p.active ? ' ⚠' : ''}</option>`)}
+            </select>
+            <div class="muted" style=${{ fontSize: 13, margin: '6px 0' }}>${curPb()?.desc || ''}${curPb()?.active ? ' · 안전 마커 페이로드를 전송합니다(비파괴).' : ''}</div>
+            ${(curPb()?.needs || []).includes('path') && html`<div><label>경로 (path)</label><input value=${pbPath} placeholder="/admin  또는  /users/123" onChange=${e => setPbPath(e.target.value)} class="mono" /></div>`}
+            ${(curPb()?.needs || []).includes('param') && html`<div><label>파라미터 (param)</label><input value=${pbParam} placeholder="id" onChange=${e => setPbParam(e.target.value)} class="mono" /></div>`}
+            <div style=${{ marginTop: 10, textAlign: 'center' }}>
+              <button class="primary" onClick=${execPlaybook} disabled=${pbBusy || !ptAttested}>${pbBusy ? '실행 중…' : '🎯 Playbook 실행'}</button>
+            </div>
+            ${pbResult && html`<div class="panel result-card" style=${{ marginTop: 12 }}>
+              <b>Playbook 결과</b> <span class="muted">· ${pbResult.host} · ${pbResult.findings.length}건</span>
+              <div style=${{ margin: '10px 0' }}><${ScoreBadge} findings=${pbResult.findings} /></div>
+              <${FindingsPanel} findings=${pbResult.findings} />
+            </div>`}
+          </div>`}
+        </div>
       `}
 
       ${tab === 'intel' && html`

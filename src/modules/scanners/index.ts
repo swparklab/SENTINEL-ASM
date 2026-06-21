@@ -5,12 +5,16 @@ import { asmScanner } from './asm.js';
 import { configScanner } from './config.js';
 import { cveScanner } from './cve.js';
 import { dastScanner } from './dast.js';
+import { accessScanner } from './access.js';
+import { aiScanner } from '../ai/index.js';
 
 export const SCANNERS: Record<ScanModule, Scanner> = {
   asm: asmScanner,
   config: configScanner,
   cve: cveScanner,
   dast: dastScanner,
+  access: accessScanner,
+  ai: aiScanner,
 };
 
 export { EgressGuard } from './egress.js';

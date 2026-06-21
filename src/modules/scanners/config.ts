@@ -243,11 +243,14 @@ export const configScanner: Scanner = {
       if (cdnSig.length) findings.push(mk('config', 'info', `CDN/WAF/서버 지문: ${cdnSig.slice(0, 3).join(', ')}`, ctx.asset.value, '응답 헤더로 CDN/WAF/서버 스택이 식별됩니다(오리진 직접 접근·우회 표면 점검 권장).', cdnSig.join(' | '), '오리진 IP 직접 노출 여부 및 WAF 우회 경로를 점검하십시오.'));
 
       // ── §5 API 심층 ──
-      const gql = await ctx.guard.httpGet(base + '/graphql', { method: 'POST', headers: { 'content-type': 'application/json' } });
-      if (gql && gql.status < 500 && /__schema|"data"|GraphQL|errors/i.test(gql.body)) {
+      // GraphQL 노출 탐지: 비파괴 GET 만 사용(쿼리 파라미터로 읽기전용 introspection-lite).
+      // POST 금지(상태 변경/뮤테이션 트리거 위험). 안전 마커 쿼리만 송신.
+      const gql = await ctx.guard.httpGet(base + '/graphql?query=' + encodeURIComponent('{__typename}'));
+      const gqlExposed = !!gql && gql.status < 500 && /__schema|__typename|"data"|GraphQL|graphql|errors/i.test(gql.body);
+      if (gqlExposed && gql) {
         findings.push(mk('config', 'low', 'GraphQL 엔드포인트 노출', ctx.asset.value, 'GraphQL 이 외부에 노출되어 인트로스펙션으로 스키마가 유출될 수 있습니다.', `status=${gql.status}`, '운영에서 인트로스펙션 비활성화 및 인증 적용.'));
-        // 필드 제안(field suggestion) 누출
-        const sug = await ctx.guard.httpGet(base + '/graphql?query=' + encodeURIComponent('{__typ}'), {});
+        // 필드 제안(field suggestion) 누출 — 의도적 오타 쿼리를 GET 으로만 송신(읽기전용).
+        const sug = await ctx.guard.httpGet(base + '/graphql?query=' + encodeURIComponent('{__typ}'));
         if (sug && /Did you mean|있습니까|suggest/i.test(sug.body)) {
           findings.push(mk('config', 'low', 'GraphQL 필드 제안(field suggestion) 누출', ctx.asset.value, '오타 시 유사 필드를 제안하여 인트로스펙션이 꺼져 있어도 스키마를 추론할 수 있습니다.', sug.body.slice(0, 80), '운영에서 필드 제안을 비활성화하십시오.'));
         }
@@ -442,10 +445,8 @@ export const configScanner: Scanner = {
         if (/PUT|DELETE|PATCH/.test(acm) && pre.headers['access-control-allow-origin']) findings.push(mk('config', 'medium', `CORS preflight 변경 메서드 과허용: ${acm}`, ctx.asset.value, 'preflight 가 PUT/DELETE/PATCH 등 상태변경 메서드를 교차출처에 허용합니다.', `Allow-Methods=${acm} Allow-Headers=${ah}`, '교차출처 허용 메서드를 최소화하십시오.'));
         if (ah === '*' || /authorization/i.test(ah)) findings.push(mk('config', 'low', 'CORS preflight Authorization 헤더 허용', ctx.asset.value, 'Authorization 등 민감 헤더를 교차출처 요청에 허용합니다.', `Allow-Headers=${ah}`, '허용 헤더를 신뢰 출처·필수 헤더로 제한하십시오.'));
       }
-      // GraphQL 배칭/GET 실행
-      if (gql && gql.status < 500 && /__schema|"data"|GraphQL|errors/i.test(gql.body)) {
-        const arr = await ctx.guard.httpGet(base + '/graphql', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '[{"query":"{__typename}"},{"query":"{__typename}"}]' });
-        if (arr && /"data"[\s\S]*"data"/.test(arr.body)) findings.push(mk('config', 'medium', 'GraphQL 배열 배칭 허용(브루트포스/증폭 표면)', ctx.asset.value, '배열 배칭이 허용되어 단일 요청에 다수 쿼리를 실행할 수 있습니다.', arr.body.slice(0, 80), '배치 비활성화 또는 복잡도/요청수 제한을 적용하십시오.'));
+      // GraphQL GET 실행 표면 (비파괴 GET 만; POST 배칭 프로브는 증폭/상태변경 위험으로 제거)
+      if (gqlExposed) {
         const get = await ctx.guard.httpGet(base + '/graphql?query=' + encodeURIComponent('{__typename}'));
         if (get && get.status === 200 && /"__typename"|"data"/.test(get.body)) findings.push(mk('config', 'medium', 'GraphQL GET 실행 허용(CSRF 표면)', ctx.asset.value, 'GET 으로 GraphQL 쿼리가 실행되어 CSRF 표면이 됩니다.', get.body.slice(0, 60), 'GET 실행을 비활성화하고 POST+CSRF 보호를 적용하십시오.'));
       }
@@ -455,6 +456,201 @@ export const configScanner: Scanner = {
       if (wsRefs.length) {
         const plain = root.body.match(/ws:\/\/[^"'\s]+/i);
         findings.push(mk('config', plain ? 'medium' : 'info', plain ? 'WebSocket 평문(ws://) 사용' : 'WebSocket 엔드포인트 노출', ctx.asset.value, plain ? '평문 ws:// 연결은 도청·변조에 취약합니다(CSWSH Origin 검증도 확인 필요).' : 'WebSocket 엔드포인트가 식별됩니다. Origin 검증(CSWSH) 적용을 확인하십시오.', (plain ? plain[0] : wsRefs[0]![0]).slice(0, 80), 'wss:// 사용 및 서버측 Origin 검증을 적용하십시오.'));
+      }
+    }
+
+    // ───── 확장 점검 ─────
+    {
+      const H = root.headers;
+      const csp2 = H['content-security-policy'];
+      const cspRO = H['content-security-policy-report-only'];
+      const setCookie2 = H['set-cookie'];
+      const ct = (H['content-type'] || '').toLowerCase();
+      const isHtml = /text\/html/.test(ct) || /<html|<!doctype/i.test(root.body.slice(0, 200));
+
+      // ── 추가 보안 헤더(저비용, 항상 수행) ──
+      // 1) Origin-Agent-Cluster 미설정
+      if (isHtml && !('origin-agent-cluster' in H)) {
+        findings.push({ ...mk('config', 'info', 'Origin-Agent-Cluster 미설정', ctx.asset.value, '오리진 단위 에이전트 클러스터링이 비활성화되어 동일 사이트 문서 간 메모리 격리가 약화됩니다.', 'no Origin-Agent-Cluster', 'Origin-Agent-Cluster: ?1 헤더를 적용하여 오리진 격리를 강화하십시오.'), owasp: 'A05:2021', cwe: 'CWE-16', confidence: 'firm', references: ['https://developer.mozilla.org/docs/Web/HTTP/Headers/Origin-Agent-Cluster'] });
+      }
+      // 2) X-DNS-Prefetch-Control 미설정/허용
+      if (H['x-dns-prefetch-control'] && /on/i.test(H['x-dns-prefetch-control'])) {
+        findings.push({ ...mk('config', 'info', 'X-DNS-Prefetch-Control: on (프라이버시 누출)', ctx.asset.value, 'DNS 프리페치가 활성화되어 사용자가 따라가지 않은 링크의 호스트까지 DNS 질의가 발생합니다.', `x-dns-prefetch-control: ${H['x-dns-prefetch-control']}`, '민감 페이지에서 X-DNS-Prefetch-Control: off 를 적용하십시오.'), owasp: 'A05:2021', cwe: 'CWE-200', confidence: 'firm' });
+      }
+      // 3) X-Download-Options 미설정 (IE 레거시지만 IIS 환경 권고)
+      if (/microsoft-iis|asp\.net/i.test((H['server'] || '') + (H['x-powered-by'] || '')) && !('x-download-options' in H)) {
+        findings.push({ ...mk('config', 'info', 'X-Download-Options 미설정 (IIS/레거시)', ctx.asset.value, 'IE 계열에서 다운로드 파일이 사이트 컨텍스트로 직접 열려 저장형 XSS 표면이 될 수 있습니다.', 'no X-Download-Options', 'X-Download-Options: noopen 을 적용하십시오.'), owasp: 'A05:2021', cwe: 'CWE-79', confidence: 'tentative' });
+      }
+      // 4) Document-Policy 부재(고성능/격리 정책 미사용) — 정보성
+      if (isHtml && (H['cross-origin-embedder-policy'] || H['cross-origin-opener-policy']) && !('document-policy' in H)) {
+        findings.push({ ...mk('config', 'info', 'Document-Policy 미설정', ctx.asset.value, '교차출처 격리 헤더는 있으나 Document-Policy 로 위험 기능(document.write, unsized-media 등) 제한이 없습니다.', 'no Document-Policy', "Document-Policy 로 'document-write', 'unsized-media' 등을 제한하십시오."), owasp: 'A05:2021', cwe: 'CWE-16', confidence: 'tentative' });
+      }
+      // 5) Clear-Site-Data 오남용 (일반 200 응답에 광범위 지정)
+      if (H['clear-site-data'] && root.status === 200 && /\*|"cache"/.test(H['clear-site-data'])) {
+        findings.push({ ...mk('config', 'low', 'Clear-Site-Data 오남용 (일반 응답에 광범위 지정)', ctx.asset.value, '로그아웃 외 일반 응답에서 Clear-Site-Data 가 광범위(*/cache)하게 설정되면 가용성/UX 문제 및 의도치 않은 상태 삭제가 발생합니다.', `clear-site-data: ${H['clear-site-data']}`, 'Clear-Site-Data 는 로그아웃 등 특정 엔드포인트에서 필요한 유형만 지정하십시오.'), owasp: 'A05:2021', cwe: 'CWE-16', confidence: 'firm' });
+      }
+      // 6) COEP 단독 누락(격리 페이지 단서가 있을 때) — SECURITY_HEADERS 미포함이라 신규
+      if (isHtml && H['cross-origin-opener-policy'] === 'same-origin' && !('cross-origin-embedder-policy' in H) && !findings.some((f) => f.title.includes('COEP'))) {
+        findings.push({ ...mk('config', 'info', 'Cross-Origin-Embedder-Policy(COEP) 누락', ctx.asset.value, 'COOP: same-origin 이 설정됐으나 COEP 가 없어 crossOriginIsolated 가 미달성되어 고정밀 타이머/SharedArrayBuffer 보호가 불완전합니다.', 'no Cross-Origin-Embedder-Policy', 'Cross-Origin-Embedder-Policy: require-corp 를 적용하십시오.'), owasp: 'A05:2021', cwe: 'CWE-16', confidence: 'firm' });
+      }
+      // 7) 민감(쿠키 설정) 응답 Cache-Control 누락 — no-store/private 둘 다 없음
+      if (setCookie2 && !('cache-control' in H) && !('pragma' in H)) {
+        findings.push({ ...mk('config', 'low', '민감 응답 Cache-Control 헤더 전무', ctx.asset.value, '세션 쿠키를 설정하는 응답에 Cache-Control 자체가 없어 중간 캐시가 임의 정책으로 저장할 수 있습니다.', 'set-cookie present, no Cache-Control', '인증/민감 응답에 Cache-Control: no-store 를 명시하십시오.'), owasp: 'A05:2021', cwe: 'CWE-525', confidence: 'firm' });
+      }
+
+      // ── CSP 추가 약점 (존재 시, 저비용) ──
+      const cspText = csp2 || '';
+      if (cspText && /script-src/.test(cspText)) {
+        const scriptSrc = (cspText.match(/script-src[^;]*/i) || [''])[0]!;
+        const cspWeak: string[] = [];
+        if (!/'nonce-|'sha(256|384|512)-/.test(cspText)) cspWeak.push('nonce/해시 미사용');
+        if (!/'strict-dynamic'/.test(cspText)) cspWeak.push("'strict-dynamic' 미사용");
+        if (/(^|\s)https?:(\s|;|$)/.test(scriptSrc) || /\bhttp:\/\//.test(scriptSrc)) cspWeak.push('http(s): 스킴 광범위 출처');
+        if (/'self'/.test(scriptSrc) && /data:/.test(scriptSrc)) cspWeak.push('script-src data: 허용');
+        if (cspWeak.length) {
+          findings.push({ ...mk('config', 'low', `CSP script-src 추가 약점: ${cspWeak.join(', ')}`, ctx.asset.value, 'CSP 가 있으나 script-src 가 nonce/strict-dynamic 없이 광범위 출처를 허용하여 우회 가능성이 있습니다.', scriptSrc.slice(0, 160), "nonce + 'strict-dynamic' 기반 정책으로 전환하고 스킴 출처를 제거하십시오."), owasp: 'A05:2021', cwe: 'CWE-1021', confidence: 'firm' });
+        }
+      }
+      // CSP report-only 만 있고 enforce 없음
+      if (cspRO && !csp2) {
+        findings.push({ ...mk('config', 'low', 'CSP가 Report-Only 전용 (강제 미적용)', ctx.asset.value, 'Content-Security-Policy-Report-Only 만 존재하여 위반이 보고만 되고 차단되지 않습니다.', cspRO.slice(0, 120), '검증 완료 후 Content-Security-Policy(강제)로 승격하십시오.'), owasp: 'A05:2021', cwe: 'CWE-693', confidence: 'firm' });
+      }
+      // CSP report-uri/report-to 없음 (모니터링 부재)
+      if (csp2 && !/report-uri|report-to/i.test(csp2)) {
+        findings.push({ ...mk('config', 'info', 'CSP 위반 보고 대상 미설정', ctx.asset.value, 'CSP 에 report-uri/report-to 가 없어 위반 시도를 수집·가시화할 수 없습니다.', csp2.slice(0, 120), 'report-to 지시문과 Reporting-Endpoints 를 설정하십시오.'), owasp: 'A09:2021', cwe: 'CWE-778', confidence: 'firm' });
+      }
+      // CSP frame-ancestors 와일드카드/광범위
+      if (csp2 && /frame-ancestors[^;]*(\*|https?:)/i.test(csp2)) {
+        findings.push({ ...mk('config', 'low', 'CSP frame-ancestors 광범위 허용', ctx.asset.value, 'frame-ancestors 에 * 또는 스킴 출처가 있어 클릭재킹 방어가 무력화됩니다.', (csp2.match(/frame-ancestors[^;]*/i) || [''])[0]!.slice(0, 120), "frame-ancestors 를 'self' 또는 신뢰 출처로 제한하십시오."), owasp: 'A05:2021', cwe: 'CWE-1021', confidence: 'firm' });
+      }
+      // upgrade-insecure-requests 미적용(HTTPS 사이트)
+      if (csp2 && ctx.asset.type !== 'host' && !/upgrade-insecure-requests/i.test(csp2)) {
+        findings.push({ ...mk('config', 'info', 'CSP upgrade-insecure-requests 미적용', ctx.asset.value, 'HTTPS 사이트의 CSP 에 upgrade-insecure-requests 가 없어 평문 하위 리소스가 차단되지 않습니다.', csp2.slice(0, 100), 'CSP 에 upgrade-insecure-requests 를 추가하십시오.'), owasp: 'A05:2021', cwe: 'CWE-319', confidence: 'firm' });
+      }
+
+      // ── 쿠키 추가 분석 (저비용) ──
+      if (setCookie2) {
+        for (const cookie of setCookie2.split(/,(?=[^;]+=)/)) {
+          const name = (cookie.split('=')[0] || '').trim();
+          const lc = cookie.toLowerCase();
+          // SameSite=None 인데 Secure 없음
+          if (/samesite\s*=\s*none/.test(lc) && !/(^|;|\s)secure(;|$|\s)/.test(lc)) {
+            findings.push({ ...mk('config', 'medium', `쿠키 SameSite=None + Secure 누락: ${name || '(이름없음)'}`, ctx.asset.value, 'SameSite=None 쿠키는 Secure 가 필수이며, 없으면 최신 브라우저가 거부하거나 평문 전송됩니다.', cookie.slice(0, 120), 'SameSite=None 쿠키에는 반드시 Secure 를 함께 지정하십시오.'), owasp: 'A05:2021', cwe: 'CWE-1275', confidence: 'firm' });
+          }
+          // 과도한 만료 (Max-Age 1년 초과 또는 먼 Expires)
+          const maxAgeM = lc.match(/max-age\s*=\s*(\d+)/);
+          if (maxAgeM && maxAgeM[1] && Number(maxAgeM[1]) > 34560000) {
+            findings.push({ ...mk('config', 'info', `쿠키 과도한 만료(Max-Age ${maxAgeM[1]}): ${name || '(이름없음)'}`, ctx.asset.value, '쿠키 수명이 비정상적으로 길어(>400일) 탈취 시 장기 악용 위험이 있습니다.', cookie.slice(0, 120), '세션/인증 쿠키의 수명을 최소화하고 정기 회전하십시오.'), owasp: 'A05:2021', cwe: 'CWE-613', confidence: 'tentative' });
+          }
+          // 광범위 Domain (선행 점 + 짧은 등록 도메인) — 휴리스틱
+          const domM = lc.match(/domain\s*=\s*\.?([^;]+)/);
+          if (domM && domM[1] && domM[1].trim().split('.').length <= 2 && !/localhost/.test(domM[1])) {
+            findings.push({ ...mk('config', 'info', `쿠키 광범위 Domain 지정: ${name || '(이름없음)'}`, ctx.asset.value, '등록 도메인 전체로 쿠키 범위가 넓어 하위 모든 서브도메인(잠재적 취약 호스트 포함)으로 전송됩니다.', cookie.slice(0, 120), '쿠키 Domain 을 필요한 호스트로 최소화하십시오.'), owasp: 'A05:2021', cwe: 'CWE-565', confidence: 'tentative' });
+          }
+          // __Secure- 접두 규칙 위반 (Secure 없음)
+          if (name.startsWith('__Secure-') && !/(^|;|\s)secure(;|$|\s)/.test(lc)) {
+            findings.push({ ...mk('config', 'medium', `__Secure- 쿠키 규칙 위반: ${name}`, ctx.asset.value, '__Secure- 접두 쿠키는 Secure 속성이 필수이나 누락되어 브라우저가 거부합니다.', cookie.slice(0, 120), '__Secure- 쿠키에 Secure 속성을 적용하십시오.'), owasp: 'A05:2021', cwe: 'CWE-1275', confidence: 'firm' });
+          }
+        }
+      }
+
+      // ── CORS 추가: Vary:Origin 부재 (앞 단계에서 ACAO 반사/동적 신호가 있을 때) ──
+      const sawCors = findings.some((f) => f.title.includes('CORS'));
+      const varyH = (H['vary'] || '').toLowerCase();
+      if (sawCors && !varyH.includes('origin')) {
+        findings.push({ ...mk('config', 'low', 'CORS 동적 Origin인데 Vary: Origin 부재', ctx.asset.value, 'Origin 별로 ACAO 가 달라지는데 Vary: Origin 이 없어 공유 캐시가 한 Origin 의 CORS 응답을 다른 Origin 에 제공할 수 있습니다(캐시 포이즈닝).', `vary=${H['vary'] || '(없음)'}`, '동적 CORS 응답에는 Vary: Origin 을 반드시 추가하십시오.'), owasp: 'A05:2021', cwe: 'CWE-525', confidence: 'firm' });
+      }
+
+      // ── 기술스택 핑거프린트 → 버전 노출 지적 (저비용, 헤더/쿠키/본문) ──
+      const fpBlob = [H['server'] || '', H['x-powered-by'] || '', H['x-generator'] || '', H['x-aspnet-version'] || '', H['x-drupal-cache'] || '', setCookie2 || '', root.body.slice(0, 4000)].join('\n');
+      for (const fr of STACK_FINGERPRINTS) {
+        const fm = fr.re.exec(fpBlob);
+        if (fm) {
+          const ver = fm[1];
+          findings.push({ ...mk('config', ver ? 'low' : 'info', ver ? `기술스택 버전 노출: ${fr.name} ${ver}` : `기술스택 지문: ${fr.name}`, ctx.asset.value, ver ? `${fr.name} ${ver} 버전이 노출되어 알려진 취약점 매칭·표적 공격에 활용될 수 있습니다.` : `${fr.name} 사용이 식별됩니다.`, fm[0].slice(0, 80), ver ? '제품·버전 식별 정보를 헤더/메타에서 제거하거나 일반화하십시오.' : '불필요한 기술 식별 신호를 제거하십시오.'), owasp: 'A05:2021', cwe: 'CWE-200', confidence: ver ? 'firm' : 'tentative' });
+        }
+      }
+      // 메타 generator 버전 노출 (WordPress 등)
+      const genMeta = root.body.match(/<meta[^>]+name=["']generator["'][^>]+content=["']([^"']+)["']/i);
+      if (genMeta && genMeta[1] && /\d/.test(genMeta[1])) {
+        findings.push({ ...mk('config', 'low', `메타 generator 버전 노출: ${genMeta[1].slice(0, 60)}`, ctx.asset.value, 'HTML meta generator 태그가 CMS/프레임워크 버전을 노출합니다.', genMeta[1].slice(0, 80), 'generator 메타 태그를 제거하십시오.'), owasp: 'A05:2021', cwe: 'CWE-200', confidence: 'confirmed' });
+      }
+    }
+
+    if (ctx.deep) {
+      // ── WebDAV/추가 메서드 (OPTIONS 로만 확인, 비파괴) ──
+      const opt2 = await ctx.guard.httpGet(base + '/', { method: 'OPTIONS' });
+      const allow2 = ((opt2?.headers['allow'] || '') + ' ' + (opt2?.headers['dav'] || '')).toUpperCase();
+      const davMethods = ['PROPFIND', 'PROPPATCH', 'MKCOL', 'COPY', 'MOVE', 'LOCK', 'UNLOCK'].filter((m) => allow2.includes(m));
+      if (davMethods.length || (opt2 && 'dav' in opt2.headers)) {
+        findings.push({ ...mk('config', 'medium', `WebDAV 활성 신호: ${davMethods.join(', ') || 'DAV 헤더'}`, ctx.asset.value, 'WebDAV 메서드/DAV 헤더가 노출되어 파일 조작·업로드 표면이 될 수 있습니다.', `Allow/DAV: ${allow2.slice(0, 120)}`, '불필요하면 WebDAV 모듈을 비활성화하고 인증·경로를 제한하십시오.'), owasp: 'A05:2021', cwe: 'CWE-650', confidence: 'firm' });
+      }
+      if (allow2.includes('TRACK') && !findings.some((f) => f.title.includes('위험 HTTP 메서드'))) {
+        findings.push({ ...mk('config', 'low', 'HTTP TRACK 메서드 허용', ctx.asset.value, 'TRACK(MS 변형 TRACE)이 허용되어 XST 표면이 될 수 있습니다.', `Allow: ${allow2.slice(0, 80)}`, 'TRACK/TRACE 메서드를 비활성화하십시오.'), owasp: 'A05:2021', cwe: 'CWE-693', confidence: 'firm' });
+      }
+
+      // ── 캐시 디셉션 표면 (확장자 붙인 경로가 200 + 캐시가능 헤더) ──
+      const deceptionPath = '/sentinel-cache-decept-' + Math.random().toString(36).slice(2) + '.css';
+      const dec = await ctx.guard.httpGet(base + deceptionPath);
+      if (dec && dec.status === 200 && !isSoft404(dec)) {
+        const cc = (dec.headers['cache-control'] || '').toLowerCase();
+        const cacheable = (dec.headers['x-cache'] || dec.headers['cf-cache-status'] || dec.headers['age']) && !/no-store|private/.test(cc);
+        if (cacheable || /public|max-age=[1-9]/.test(cc)) {
+          findings.push({ ...mk('config', 'medium', '웹 캐시 디셉션 표면 (확장자 경로가 캐시가능 동적응답)', ctx.asset.value, '존재하지 않는 .css 확장자 경로가 200 으로 동적 응답되며 캐시 가능하여, 인증 페이지를 정적자원처럼 캐시에 저장·유출시키는 캐시 디셉션 표면이 됩니다.', `path=${deceptionPath} status=200 cache-control=${dec.headers['cache-control'] || '-'} x-cache=${dec.headers['x-cache'] || dec.headers['cf-cache-status'] || '-'}`, '확장자가 라우팅을 우회하지 못하게 하고, 동적 응답을 정적 확장자로 캐시하지 마십시오.'), owasp: 'A05:2021', cwe: 'CWE-525', confidence: 'tentative' });
+        }
+      }
+
+      // ── 추가 민감 파일/경로 (콘텐츠 시그니처 + soft-404 가드) ──
+      for (const p of EXTRA_SENSITIVE_PATHS) {
+        const r = await ctx.guard.httpGet(base + p.path);
+        if (!r || r.status !== 200 || !r.body) continue;
+        if (isSoft404(r)) continue;
+        if (/<html|<!doctype html/i.test(r.body.slice(0, 200)) && !p.allowHtml) continue;
+        if (!p.sig(r.body)) continue;
+        findings.push({ ...mk('config', p.severity, p.title, ctx.asset.value + p.path, '소스/설정/민감 정보가 외부에 노출되어 있습니다.', `status=200, sig=match, ${r.body.slice(0, 60).replace(/\s+/g, ' ')}`, p.remediation), owasp: p.owasp, cwe: p.cwe, confidence: 'confirmed' });
+      }
+
+      // ── sitemap.xml 내 민감 경로 역노출 ──
+      const sitemap = await ctx.guard.httpGet(base + '/sitemap.xml');
+      if (sitemap && sitemap.status === 200 && /<urlset|<sitemapindex|<loc>/i.test(sitemap.body)) {
+        const locs = [...sitemap.body.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)].map((m) => m[1]!);
+        const sensitive = locs.filter((u) => /admin|internal|private|backup|config|staging|test|dev|secret|api\/|wp-admin|phpmyadmin|debug/i.test(u)).slice(0, 8);
+        if (sensitive.length) {
+          findings.push({ ...mk('config', 'low', `sitemap.xml 민감 경로 ${sensitive.length}건 역노출`, ctx.asset.value, 'sitemap.xml 이 관리/내부/스테이징 경로를 색인 대상으로 노출합니다.', sensitive.join('\n').slice(0, 200), 'sitemap 에서 비공개 경로를 제거하고 접근통제를 적용하십시오.'), owasp: 'A01:2021', cwe: 'CWE-200', confidence: 'firm' });
+        }
+      }
+
+      // ── security.txt 품질(존재 시) ──
+      const sectxt2 = await ctx.guard.httpGet(base + '/.well-known/security.txt');
+      if (sectxt2 && sectxt2.status === 200 && /contact:/i.test(sectxt2.body)) {
+        const sissues: string[] = [];
+        if (!/expires:/i.test(sectxt2.body)) sissues.push('Expires 필드 부재(RFC 9116 위반)');
+        const expM = sectxt2.body.match(/expires:\s*([^\r\n]+)/i);
+        if (expM && expM[1]) { const exp = Date.parse(expM[1].trim()); if (!Number.isNaN(exp) && exp < Date.now()) sissues.push('Expires 만료됨'); }
+        if (/contact:\s*http:\/\//i.test(sectxt2.body)) sissues.push('Contact 평문 HTTP');
+        if (!/encryption:/i.test(sectxt2.body)) sissues.push('Encryption(PGP) 키 부재');
+        if (!/-----BEGIN PGP SIGNATURE-----/.test(sectxt2.body)) sissues.push('PGP 서명 부재');
+        if (sissues.length) {
+          findings.push({ ...mk('config', 'info', `security.txt 품질 미흡: ${sissues.join(', ')}`, ctx.asset.value, 'security.txt 가 존재하나 RFC 9116 권고(Expires/서명/암호화 등)를 충족하지 못합니다.', sissues.join(' / '), 'Expires(미래)·Encryption·PGP 서명을 포함하고 Contact 를 HTTPS/mailto 로 지정하십시오.'), owasp: 'A05:2021', cwe: 'CWE-16', confidence: 'firm' });
+        }
+      }
+
+      // ── 추가 .well-known 리소스 노출 ──
+      for (const wk of EXTRA_WELLKNOWN) {
+        const r = await ctx.guard.httpGet(base + wk.path);
+        if (!r || r.status !== 200 || !r.body) continue;
+        if (/<html/i.test(r.body.slice(0, 100))) continue;
+        if (!wk.sig(r.body)) continue;
+        findings.push({ ...mk('config', wk.severity, wk.title, ctx.asset.value + wk.path, wk.desc, r.body.slice(0, 100).replace(/\s+/g, ' '), wk.remediation), owasp: 'A05:2021', cwe: 'CWE-200', confidence: 'firm' });
+      }
+
+      // ── 디렉터리 리스팅 노출 ──
+      for (const dp of ['/uploads/', '/files/', '/images/', '/static/', '/assets/', '/backup/']) {
+        const r = await ctx.guard.httpGet(base + dp);
+        if (r && r.status === 200 && /<title>Index of|Directory listing for|\[To Parent Directory\]/i.test(r.body)) {
+          findings.push({ ...mk('config', 'medium', `디렉터리 리스팅 노출: ${dp}`, ctx.asset.value + dp, '디렉터리 자동 색인이 켜져 있어 파일 목록이 그대로 노출됩니다.', r.body.slice(0, 80).replace(/\s+/g, ' '), '웹서버에서 디렉터리 자동 색인(autoindex/Options Indexes)을 비활성화하십시오.'), owasp: 'A05:2021', cwe: 'CWE-548', confidence: 'confirmed' });
+          break;
+        }
       }
     }
 
@@ -547,6 +743,67 @@ function scanSecrets(text: string, where: string): { label: string; where: strin
   }
   return out;
 }
+
+/** 기술스택 핑거프린트 — 헤더/쿠키/본문에서 제품(및 버전) 식별. 캡처그룹 1=버전(선택). */
+const STACK_FINGERPRINTS: { name: string; re: RegExp }[] = [
+  { name: 'WordPress', re: /wp-content|wordpress\s*([\d.]+)?/i },
+  { name: 'Drupal', re: /(?:x-drupal|Drupal)\s*[\/ ]?([\d.]+)?/i },
+  { name: 'Joomla', re: /joomla!?\s*([\d.]+)?/i },
+  // Express: 'express' 단어는 일반 본문에 흔하므로 X-Powered-By 헤더 또는 connect.sid 쿠키 앵커로만 식별(오탐 억제).
+  { name: 'Express', re: /x-powered-by:\s*express(?:[\/ ]([\d.]+))?|(?:^|\n|;|\s)connect\.sid=/i },
+  { name: 'Next.js', re: /(?:x-powered-by:\s*)?Next\.js\s*([\d.]+)?/i },
+  { name: 'Nuxt', re: /__NUXT__|nuxt\s*([\d.]+)?/i },
+  { name: 'Laravel', re: /laravel_session|Laravel\s*([\d.]+)?/i },
+  // Django: 'csrftoken' 문자열은 다른 앱 JS 에도 흔하므로 쿠키 토큰(csrftoken=) 또는 명시적 'Django' 버전 문자열만 인정.
+  { name: 'Django', re: /(?:^|\n|;|\s)csrftoken=|Django\s*([\d.]+)?/i },
+  // Rails: '_session_id' 부분일치는 오탐이 많으므로 쿠키 토큰(_session_id=) 경계 또는 명시 제품명만 인정.
+  { name: 'Rails', re: /(?:^|\n|;|\s)_session_id=|Ruby on Rails|Phusion Passenger\s*([\d.]+)?/i },
+  { name: 'ASP.NET', re: /ASP\.NET(?:\s+Version:?\s*([\d.]+))?/i },
+  { name: 'Tomcat', re: /Apache Tomcat\/?([\d.]+)?/i },
+  { name: 'Jetty', re: /Jetty\(?([\d.]+)?\)?/i },
+  { name: 'Gunicorn', re: /gunicorn\/?([\d.]+)?/i },
+  { name: 'Werkzeug', re: /Werkzeug\/?([\d.]+)?/i },
+  { name: 'WordPress WooCommerce', re: /woocommerce(?:[-/ ]([\d.]+))?/i },
+];
+
+interface ExtraPathRule { path: string; title: string; severity: Finding['severity']; sig: (b: string) => boolean; remediation: string; owasp?: string; cwe?: string; allowHtml?: boolean; }
+/** 확장 민감 파일/경로 — 콘텐츠 시그니처 + soft-404 가드(deep 전용, SENSITIVE/DEEP_PATHS 와 비중복). */
+const EXTRA_SENSITIVE_PATHS: ExtraPathRule[] = [
+  { path: '/.pypirc', title: '.pypirc(PyPI 자격증명) 노출', severity: 'high', sig: (b) => /\[(pypi|distutils)\]|username\s*=|password\s*=/i.test(b), remediation: '차단 및 PyPI 토큰 폐기·재발급', owasp: 'A05:2021', cwe: 'CWE-522' },
+  { path: '/.dockerignore', title: '.dockerignore 노출', severity: 'info', sig: (b) => /(^|\n)\s*(node_modules|\.git|\*)/.test(b) && !/<html/i.test(b), remediation: '배포 산출물에서 제외', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/Dockerfile', title: 'Dockerfile 노출', severity: 'medium', sig: (b) => /^\s*(FROM|RUN|COPY|ENV|CMD|ENTRYPOINT)\b/im.test(b), remediation: 'Dockerfile 을 웹루트에서 제거', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/.github/workflows/ci.yml', title: 'GitHub Actions 워크플로 노출', severity: 'medium', sig: (b) => /(^|\n)\s*(on:|jobs:|runs-on:|steps:)/.test(b), remediation: 'CI 워크플로 노출 차단 및 시크릿 점검', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/application.properties', title: 'Spring application.properties 노출', severity: 'high', sig: (b) => /spring\.|server\.port|datasource|jdbc:/i.test(b), remediation: '설정 파일 외부 접근 차단', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/application.yml', title: 'Spring application.yml 노출', severity: 'high', sig: (b) => /spring:|datasource:|jdbc:|server:/i.test(b) && !/<html/i.test(b), remediation: '설정 파일 외부 접근 차단', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/secrets.yaml', title: 'secrets.yaml 노출', severity: 'critical', sig: (b) => /(password|secret|token|api[_-]?key)\s*:/i.test(b) && !/<html/i.test(b), remediation: '즉시 차단 및 노출 시크릿 폐기', owasp: 'A05:2021', cwe: 'CWE-522' },
+  { path: '/.terraform/terraform.tfstate', title: 'Terraform 작업 디렉터리 state 노출', severity: 'critical', sig: (b) => /"terraform_version"|"resources"/.test(b), remediation: '원격 백엔드 이전 및 접근 차단', owasp: 'A05:2021', cwe: 'CWE-522' },
+  { path: '/.ansible/hosts', title: 'Ansible 인벤토리 노출', severity: 'medium', sig: (b) => /\[[\w-]+\]|ansible_host|ansible_user/i.test(b) && !/<html/i.test(b), remediation: 'IaC 산출물을 웹루트에서 제거', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/.ssh/id_rsa', title: '.ssh/id_rsa 개인키 노출', severity: 'critical', sig: (b) => /PRIVATE KEY/.test(b), remediation: '즉시 차단 및 SSH 키 폐기·교체', owasp: 'A05:2021', cwe: 'CWE-522' },
+  { path: '/.ssh/authorized_keys', title: '.ssh/authorized_keys 노출', severity: 'high', sig: (b) => /ssh-(rsa|ed25519|dss)\s+[A-Za-z0-9+/]/.test(b), remediation: '차단하고 허용 키를 점검·회전하십시오.', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/.vscode/sftp.json', title: '.vscode/sftp.json(배포 자격증명) 노출', severity: 'critical', sig: (b) => /"host"|"username"|"password"|"privateKeyPath"/i.test(b), remediation: '차단 및 배포 자격증명 교체', owasp: 'A05:2021', cwe: 'CWE-522' },
+  { path: '/php.ini', title: 'php.ini 노출', severity: 'medium', sig: (b) => /\[PHP\]|display_errors|allow_url_fopen|expose_php/i.test(b), remediation: 'php.ini 외부 접근 차단', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/.user.ini', title: '.user.ini 노출', severity: 'medium', sig: (b) => /=\s*/.test(b) && /(php|engine|auto_prepend|open_basedir)/i.test(b), remediation: '.user.ini 외부 접근 차단', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/package.json', title: '루트 package.json 노출', severity: 'low', sig: (b) => /"dependencies"|"scripts"|"name"\s*:/.test(b) && !/<html/i.test(b), remediation: '웹루트에서 package.json 노출을 차단하십시오.', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/config.php.bak', title: 'config.php.bak 노출', severity: 'critical', sig: (b) => /<\?php|define\(|DB_|password/i.test(b), remediation: '백업 파일 제거 및 자격증명 교체', owasp: 'A05:2021', cwe: 'CWE-530' },
+  { path: '/db.sqlite', title: 'SQLite DB 파일(db.sqlite) 노출', severity: 'critical', sig: (b) => b.startsWith('SQLite format 3') || /SQLite format 3/.test(b.slice(0, 32)), remediation: 'DB 파일을 웹루트에서 제거·차단', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/database.sqlite', title: 'SQLite DB 파일(database.sqlite) 노출', severity: 'critical', sig: (b) => b.startsWith('SQLite format 3'), remediation: 'DB 파일을 웹루트에서 제거·차단', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/.env.development', title: '.env.development 노출', severity: 'high', sig: (b) => /(^|\n)\s*[A-Z0-9_]+\s*=/.test(b) && !/<html/i.test(b), remediation: '차단 및 비밀키 교체', owasp: 'A05:2021', cwe: 'CWE-522' },
+  { path: '/.env.bak', title: '.env.bak 노출', severity: 'critical', sig: (b) => /(^|\n)\s*[A-Z0-9_]+\s*=/.test(b) && !/<html/i.test(b), remediation: '차단 및 노출된 모든 비밀키 폐기·재발급', owasp: 'A05:2021', cwe: 'CWE-530' },
+  { path: '/Gemfile', title: 'Ruby Gemfile 노출', severity: 'low', sig: (b) => /^\s*(source|gem|ruby)\b/im.test(b) && !/<html/i.test(b), remediation: '의존성 매니페스트 노출 검토', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/requirements.txt', title: 'Python requirements.txt 노출', severity: 'info', sig: (b) => /^[\w.-]+[=<>~]=?[\d.]/m.test(b) && !/<html/i.test(b), remediation: '의존성 노출 여부 검토 및 버전 취약점 점검', owasp: 'A06:2021', cwe: 'CWE-200' },
+  { path: '/Procfile', title: 'Procfile 노출', severity: 'info', sig: (b) => /^(web|worker|release):/m.test(b) && !/<html/i.test(b), remediation: '배포 산출물 노출 검토', owasp: 'A05:2021', cwe: 'CWE-200' },
+  { path: '/.editorconfig', title: '.editorconfig 노출', severity: 'info', sig: (b) => /\[\*\]|root\s*=\s*true|indent_style/i.test(b) && !/<html/i.test(b), remediation: '개발 산출물 배포 제외', owasp: 'A05:2021', cwe: 'CWE-200' },
+];
+
+/** 확장 .well-known 리소스 — 노출/약점. */
+const EXTRA_WELLKNOWN: { path: string; title: string; severity: Finding['severity']; sig: (b: string) => boolean; desc: string; remediation: string }[] = [
+  { path: '/.well-known/dnt-policy.txt', title: 'DNT 정책 노출', severity: 'info', sig: (b) => /tracking|do not track/i.test(b), desc: 'Do-Not-Track 정책 파일이 노출됩니다.', remediation: '의도된 게시인지 확인하십시오.' },
+  { path: '/.well-known/host-meta', title: 'host-meta(서비스 디스커버리) 노출', severity: 'info', sig: (b) => /<XRD|<Link/i.test(b), desc: 'host-meta 가 내부 서비스/엔드포인트를 노출할 수 있습니다.', remediation: '불필요한 디스커버리 노출을 제한하십시오.' },
+  { path: '/.well-known/webfinger', title: 'WebFinger 계정 열거 표면', severity: 'low', sig: (b) => /"subject"|"links"/.test(b), desc: 'WebFinger 가 계정/식별자 열거 표면이 될 수 있습니다.', remediation: '레이트리밋·인증으로 열거를 제한하십시오.' },
+  { path: '/.well-known/openpgpkey/policy', title: 'OpenPGP 정책 노출', severity: 'info', sig: (b) => /./.test(b), desc: 'OpenPGP 웹키 디렉터리 정책이 노출됩니다.', remediation: '의도된 게시인지 확인하십시오.' },
+  { path: '/.well-known/acme-challenge/sentinel-probe', title: 'ACME challenge 디렉터리 접근 가능', severity: 'info', sig: (b) => /./.test(b) && !/not found/i.test(b), desc: 'ACME 챌린지 경로가 임의 콘텐츠를 반환하여 검증 우회/혼선 표면이 될 수 있습니다.', remediation: 'ACME 챌린지 경로는 인증서 발급 중에만 노출되도록 제한하십시오.' },
+  { path: '/.well-known/traffic-advice', title: 'traffic-advice(프리페치 정책) 노출', severity: 'info', sig: (b) => /user_agent|google-safety|disallow/i.test(b), desc: '프록시 프리페치 정책이 노출됩니다.', remediation: '의도된 게시인지 확인하십시오.' },
+];
 
 /** 두 응답 본문이 사실상 동일한지(soft-404 판정). 길이 + 접두 비교. */
 function similar(a: string, b: string): boolean {

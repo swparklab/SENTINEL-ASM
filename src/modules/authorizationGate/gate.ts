@@ -20,6 +20,8 @@ export interface GateRequest {
   modules: ScanModule[];
   /** 능동 발신이 필요한 실제 점검 대상들 (서브도메인/호스트 등) */
   targets: string[];
+  /** 활성(침투) 검증 모드 — 취약점을 실제 트리거해 확정(비파괴 한정). aggressive + 4-eyes 필수. */
+  active?: boolean;
   actor: string;
 }
 
@@ -52,6 +54,12 @@ export function evaluateGate(req: GateRequest): GateDecision {
     return reject('소유권이 검증되지 않은 자산입니다 (ownership != verified).');
   }
 
+  // 활성(침투) 검증은 강도와 무관하게 aggressive 가 아니면 즉시 거부한다.
+  // passive 조기허용(아래)보다 먼저 평가해야 {intensity:'passive', active:true} 우회를 차단한다.
+  if (req.active && req.intensity !== 'aggressive') {
+    return reject('활성(침투) 검증 모드는 aggressive 강도(+ 4-eyes 서면승인)에서만 허용됩니다.');
+  }
+
   // passive 프로파일은 소유권 검증만으로 허용 (설계 §4.5: 대상에 트래픽 미발생)
   if (req.intensity === 'passive') {
     const egress = computeEgressAllowlist(req.asset, req.consent);
@@ -80,6 +88,7 @@ export function evaluateGate(req: GateRequest): GateDecision {
     return reject(`요청 강도(${req.intensity})가 동의 한도(${consent.scope.maxIntensity})를 초과합니다.`);
   }
   // Aggressive 는 추가 서면 승인 필요 (설계 §4.5 / §9 4-eyes)
+  // active 는 위에서 이미 aggressive 를 강제했으므로, 이 검사로 4-eyes 서면승인이 자동 강제된다.
   if (req.intensity === 'aggressive' && !consent.aggressiveApprovedBy) {
     return reject('Aggressive 프로파일은 추가 서면 승인(4-eyes)이 필요합니다.');
   }

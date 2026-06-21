@@ -32,4 +32,20 @@ export const config = {
   audit: {
     file: process.env.AUDIT_FILE ?? path.join(root, 'data', 'audit.log.jsonl'),
   },
+
+  /**
+   * AI 보안 분석 엔진 (설계 §5.3 — 적응형 점검·분석).
+   * LLM 은 "계획·분석"만 하고, 실제 패킷 발신은 기존 비파괴 엔진(EgressGuard, GET/HEAD/OPTIONS)이 수행한다.
+   * 키 미설정 시 전체 플랫폼은 그대로 동작하며 AI 기능만 비활성(graceful degradation)된다.
+   * 외부 LLM 벤더로 나가는 정보는 fingerprint 단계에서 PII/시크릿을 마스킹·제거한 뒤 전송한다.
+   */
+  ai: {
+    apiKey: process.env.SENTINEL_AI_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? process.env.OPENAI_API_KEY ?? '',
+    provider: (process.env.SENTINEL_AI_PROVIDER ?? 'anthropic') as 'anthropic' | 'openai',
+    model: process.env.SENTINEL_AI_MODEL ?? 'claude-sonnet-4-6',
+    baseUrl: process.env.SENTINEL_AI_BASE_URL ?? '',
+    maxProbes: Number(process.env.SENTINEL_AI_MAX_PROBES ?? 18),
+    timeoutMs: Number(process.env.SENTINEL_AI_TIMEOUT_MS ?? 30_000),
+    maxTokens: Number(process.env.SENTINEL_AI_MAX_TOKENS ?? 2048),
+  },
 } as const;
