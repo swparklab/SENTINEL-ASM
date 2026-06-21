@@ -61,10 +61,15 @@ export const configScanner: Scanner = {
     const isSoft404 = (r: { status: number; body: string }) =>
       (baseStatus === 200 && r.status === 200 && similar(r.body, baseBody));
 
-    // 1) 보안 헤더
+    // 1) 보안 헤더 — 근거는 "요청 + 실제 수신 헤더 목록 + 해당 헤더 부재"를 모두 보여 검증 가능하게 한다.
+    const recvHeaderNames = Object.keys(root.headers);
     for (const h of SECURITY_HEADERS) {
       if (!(h.header in root.headers)) {
-        findings.push({ ...mk('config', h.severity, h.title, ctx.asset.value, `응답에 ${h.header} 헤더가 없습니다.`, `status=${root.status}`, h.remediation), confidence: 'firm' });
+        const evidence =
+          `요청: GET ${base}/  →  HTTP ${root.status}\n` +
+          `관측: 응답 헤더에 '${h.header}' 없음\n` +
+          `수신한 헤더(${recvHeaderNames.length}개): ${recvHeaderNames.join(', ') || '(없음)'}`;
+        findings.push({ ...mk('config', h.severity, h.title, ctx.asset.value, `응답에 ${h.header} 헤더가 없습니다.`, evidence, h.remediation), confidence: 'firm' });
       }
     }
     // 레거시/위험 헤더 값
