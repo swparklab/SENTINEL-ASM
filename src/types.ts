@@ -101,6 +101,8 @@ export interface Finding {
   severity: Severity;
   /** CVSS 기본점수 0–10 (설계 §5.1) */
   cvss?: number;
+  /** CVSS 3.1 벡터 문자열 (산정 근거 추적용, 예: CVSS:3.1/AV:N/AC:L/...) */
+  cvssVector?: string;
   /** EPSS 익스플로잇 확률 0–1 (설계 §5.1) */
   epss?: number;
   /** CISA KEV 등재 여부 (설계 §4.3) */
