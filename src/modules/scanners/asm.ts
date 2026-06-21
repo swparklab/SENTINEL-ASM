@@ -11,6 +11,7 @@ import type { Scanner, ScanContext } from './types.js';
 import { PORT_SERVICE, STANDARD_PORTS, DEEP_PORTS } from './types.js';
 import { CVE_FEED, lessThan } from './feed.js';
 import { queryCrtSh, detectInternalNaming } from './ctlog.js';
+import { checkIndicatorsAndEnrich, type Indicator } from '../threatintel/cti.js';
 
 const SUBDOMAIN_WORDLIST = ['www', 'mail', 'api', 'dev', 'staging', 'test', 'admin', 'vpn', 'gw', 'git', 'jenkins', 'portal', 'beta', 'old', 'backup'];
 const SUBDOMAIN_DEEP = [...SUBDOMAIN_WORDLIST,
@@ -112,14 +113,22 @@ export const asmScanner: Scanner = {
         findings.push(mk('asm', 'medium', '공개 DNS 에 사설 IP 노출', host, '공개 DNS 레코드가 사설/내부 IP(RFC1918 등)를 가리켜 내부 토폴로지 누출 및 DNS rebinding 표적이 됩니다.', privateHits.slice(0, 8).join('\n'), '내부 IP 는 공개 DNS 에 게시하지 말고 분할 DNS(split-horizon)를 사용하십시오.'));
       }
 
-      // 서브도메인 탈취 + CNAME 체인 위생
+      // ── 위협 인텔/IoC 대조 — 발견 IP/도메인/CNAME 을 known-bad 와 대조(외부 CTI 소비, 대상 미발신) ──
+      const indicators: Indicator[] = [
+        ...[...apexA, ...apexAAAA].map((ip) => ({ type: 'ip' as const, value: ip })),
+        { type: 'domain' as const, value: host },
+        ...discovered.map((d) => ({ type: 'domain' as const, value: d.sub })),
+        ...discovered.filter((d) => d.ip).map((d) => ({ type: 'ip' as const, value: d.ip })),
+        ...discovered.filter((d) => d.cname).map((d) => ({ type: 'cname' as const, value: d.cname! })),
+      ];
+      findings.push(...await checkIndicatorsAndEnrich(ctx, indicators));
+
+      // ── 서브도메인 탈취(dangling CNAME) — 비파괴 다중신호 판정(실 클레임/등록 금지, GET 만) ──
       if (ctx.deep) {
-        for (const d of discovered) {
-          if (!d.cname) continue;
-          const fp = TAKEOVER_FINGERPRINTS.find((f) => d.cname!.includes(f));
-          if (fp && !(await ctx.guard.resolveDns(d.cname!)).length) {
-            findings.push(mk('asm', 'high', `서브도메인 탈취 가능성: ${d.sub}`, d.sub, `CNAME(${d.cname})이 미점유 SaaS(${fp})를 가리켜 공격자가 선점·탈취할 수 있습니다.`, `CNAME=${d.cname}`, '미사용 CNAME 레코드를 제거하거나 대상 리소스를 재점유하십시오.'));
-          }
+        // CT 로그 호스트도 탈취 점검 대상에 흡수(인증서는 발급됐으나 DNS 폐기 가능성).
+        for (const d of discovered.slice(0, 40)) {
+          const f = await classifyTakeover(ctx, d, wildcardIps);
+          if (f) findings.push(f);
         }
       }
 
@@ -278,7 +287,12 @@ export const asmScanner: Scanner = {
     if (open.includes(443) || ctx.asset.type !== 'host') {
       const t = await ctx.guard.tlsInspect(host, 443);
       if (t && (t.subject || t.san.length)) {
-        if (t.daysToExpiry !== null && t.daysToExpiry < 30) findings.push(mk('asm', t.daysToExpiry < 0 ? 'critical' : 'medium', t.daysToExpiry < 0 ? 'TLS 인증서 만료됨' : `TLS 인증서 만료 임박 (${t.daysToExpiry}일)`, host, `CN=${t.subject ?? '?'} 만료=${t.validTo}`, `protocol=${t.protocol}`, '인증서를 갱신하고 자동 갱신(ACME)을 구성하십시오.'));
+        if (t.daysToExpiry !== null && t.daysToExpiry < 30) {
+          const d = t.daysToExpiry;
+          const sev: Finding['severity'] = d < 0 ? (d < -7 ? 'critical' : 'high') : d < 14 ? 'medium' : 'low';
+          const title = d < 0 ? `TLS 인증서 만료됨 (${Math.abs(d)}일 경과)` : d < 14 ? `TLS 인증서 만료 임박 (${d}일)` : `TLS 인증서 만료 예정 (${d}일)`;
+          findings.push({ ...mk('asm', sev, title, host, `CN=${t.subject ?? '?'} 만료=${t.validTo} (D${d >= 0 ? '-' : '+'}${Math.abs(d)})`, `validTo=${t.validTo} daysToExpiry=${d} issuer=${t.issuer ?? '?'}`, '인증서를 갱신하고 자동 갱신(ACME)을 구성해 만료로 인한 서비스 중단·신뢰 경고를 예방하십시오.'), owasp: 'A02:2021', cwe: 'CWE-298', confidence: 'firm' });
+        }
         if (t.hostnameMismatch) findings.push(mk('asm', 'high', 'TLS 인증서 호스트명/SAN 불일치', host, '제시된 인증서가 요청 호스트명과 일치하지 않습니다(MITM/오구성).', `host=${host} SAN=${t.san.slice(0, 8).join(',')}`, '대상 호스트명을 포함하는 올바른 인증서를 배포하십시오.'));
         if (t.selfSigned) findings.push(mk('asm', 'high', '자가서명/사설 CA 인증서', host, '공인 신뢰 체인에 연결되지 않아 브라우저 경고·MITM 표면이 됩니다.', `subject=${t.subject} issuer=${t.issuer}`, '공인 CA 발급 인증서로 교체하십시오.'));
         if (t.keyBits !== null && t.keyType === 'rsa' && t.keyBits < 2048) findings.push(mk('asm', 'high', `짧은 RSA 키(${t.keyBits}bit)`, host, '2048bit 미만 RSA 키는 약합니다.', `bits=${t.keyBits}`, 'RSA 2048bit 이상(또는 ECDSA P-256+)로 재발급하십시오.'));
@@ -648,6 +662,63 @@ export function isPrivateIp(ip: string): boolean {
   }
   const l = ip.toLowerCase();
   return l === '::1' || l.startsWith('fe80:') || l.startsWith('fc') || l.startsWith('fd');
+}
+
+/** 미점유(unclaimed) 호스팅 배너 시그니처 — 서브도메인 탈취 확정 신호. */
+const TAKEOVER_SIGNATURES: { re: RegExp; svc: string }[] = [
+  { re: /there isn't a github pages site here/i, svc: 'GitHub Pages' },
+  { re: /\bno such app\b|herokucdn\.com\/error-pages\/no-such-app/i, svc: 'Heroku' },
+  { re: /nosuchbucket|the specified bucket does not exist/i, svc: 'AWS S3' },
+  { re: /deployment_not_found|the deployment could not be found/i, svc: 'Vercel' },
+  { re: /\bproject not found\b/i, svc: 'Surge/Vercel' },
+  { re: /fastly error: unknown domain/i, svc: 'Fastly' },
+  { re: /do not have access to view this domain|not found - request id/i, svc: 'Netlify' },
+  { re: /nothing is here yet|this page is not published/i, svc: 'Cloudflare Pages' },
+  { re: /the thing you were looking for is no longer here|domain error/i, svc: 'Ghost' },
+  { re: /unknown to read the docs|is unknown to read/i, svc: 'ReadTheDocs' },
+  { re: /this domain is successfully pointed at wp engine.*but is not configured/i, svc: 'WP Engine' },
+];
+function matchTakeoverSig(body: string): string | null {
+  for (const s of TAKEOVER_SIGNATURES) if (s.re.test(body)) return s.svc;
+  return null;
+}
+
+/**
+ * 서브도메인 탈취(dangling CNAME) 비파괴 판정. 외부 리소스 점유(claim/register) 시도는 절대 하지 않으며
+ * DNS 해석(resolveDns/resolve6)과 HTTP GET(미점유 배너 읽기)만 수행한다.
+ * 반환: 탈취 가능 finding 또는 null(정상/와일드카드/판단불가).
+ */
+export async function classifyTakeover(ctx: ScanContext, d: { sub: string; ip: string; cname?: string }, wildcardIps: Set<string> | null): Promise<Finding | null> {
+  if (!d.cname) return null;
+  const cname = d.cname.toLowerCase().replace(/\.$/, '');
+  const fp = TAKEOVER_FINGERPRINTS.find((f) => cname.includes(f));
+  if (!fp) return null;
+  // 와일드카드 catch-all 응답이면 dangling 아님(오탐 억제).
+  if (wildcardIps && d.ip && wildcardIps.has(d.ip)) return null;
+
+  // (1) CNAME 타깃 미해석 → dangling(NXDOMAIN)
+  const a = await ctx.guard.resolveDns(cname).catch(() => [] as string[]);
+  const aaaa = await ctx.guard.resolve6(cname).catch(() => [] as string[]);
+  const unresolved = a.length === 0 && aaaa.length === 0;
+
+  // (2) 미점유 배너 시그니처(GET, 비파괴) — https/http 모두 시도하고 시그니처 발견 시에만 중단(빈 응답에 안 멈춤).
+  let sig: string | null = null;
+  for (const scheme of ['https', 'http']) {
+    let r: { status: number; body: string } | null = null;
+    try { r = await ctx.guard.httpGet(`${scheme}://${d.sub}/`, { timeoutMs: 5000 }); } catch { r = null; }
+    if (r && r.body) { sig = matchTakeoverSig(r.body); if (sig) break; }
+  }
+
+  if (!unresolved && !sig) return null; // 정상 점유 서비스 → 오탐 억제
+  // 미점유 배너 시그니처=확정(firm), CNAME 타깃 미해석(NXDOMAIN)만=정황(tentative).
+  const conf: Finding['confidence'] = sig ? 'firm' : 'tentative';
+  return {
+    ...mk('asm', 'high', `서브도메인 탈취 가능성: ${d.sub}`, d.sub,
+      `CNAME(${d.cname})이 외부 SaaS/CDN(${fp})을 가리키며, ${sig ? `미점유 배너(${sig})가 관측` : 'CNAME 타깃이 미해석(dangling)'}됩니다. 공격자가 해당 리소스를 선점·등록해 서브도메인을 탈취할 수 있습니다(비파괴 판정 — 실제 점유 미시도).`,
+      `CNAME=${d.cname} (${fp}); ${sig ? `takeover signature: ${sig}` : 'target unresolved(NXDOMAIN)'}`,
+      '미사용 CNAME 레코드를 즉시 제거하거나, 가리키는 외부 리소스를 정당 소유자가 재점유(claim)하십시오.'),
+    owasp: 'A05:2021', cwe: 'CWE-350', confidence: conf, references: ['https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/10-Test_for_Subdomain_Takeover'],
+  };
 }
 
 /** 배너에서 제품/버전 추출. */
