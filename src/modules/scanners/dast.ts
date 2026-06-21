@@ -10,6 +10,7 @@ import type { Scanner, ScanContext } from './types.js';
 import { mk } from './asm.js';
 import { runActiveConfirmation } from './active.js';
 import { runLlmScan } from './llm.js';
+import { crawlSurface, buildParamUrl, type CrawlResult } from './crawl.js';
 
 export const dastScanner: Scanner = {
   module: 'dast',
@@ -536,6 +537,56 @@ export const dastScanner: Scanner = {
       }
     }
 
+    // ── 전수 스크리닝(deep): 비파괴 크롤로 앱 전체 표면을 발견하고, 모든 파라미터에 동적 점검을 일괄 적용 ──
+    let crawlResult: CrawlResult | null = null;
+    if (ctx.deep) {
+      try {
+        crawlResult = await crawlSurface(ctx, base, ctx.asset.value, root.body, { maxPages: ctx.intensity === 'aggressive' ? 60 : 30 });
+        findings.push(mk('dast', 'info', `공격표면 인벤토리(전수 크롤): 페이지 ${crawlResult.pages.length} · 파라미터 ${crawlResult.params.length} · 폼 ${crawlResult.forms.length} · API ${crawlResult.apiPaths.length}`,
+          ctx.asset.value, '비파괴 크롤로 발견한 전체 공격표면입니다(홈페이지뿐 아니라 발견된 모든 경로·파라미터·폼·API 에 동적 점검을 적용했습니다).',
+          `pages: ${crawlResult.pages.slice(0, 12).join(', ')}${crawlResult.pages.length > 12 ? ` … (+${crawlResult.pages.length - 12})` : ''}`,
+          '미사용/비공개 경로는 차단하고 외부 노출 표면을 최소화하십시오.'));
+        const seen = new Set<string>();
+        const cap = ctx.intensity === 'aggressive' ? 50 : 35;
+        for (const t of crawlResult.params.slice(0, cap)) {
+          const key = t.path + '?' + t.param;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          // 반사형 XSS — 컨텍스트를 깨는 마커를 주입하고, 원시 < " 가 인코딩 없이 생존(HTML 컨텍스트)할 때만 high/firm.
+          // 영숫자 마커만 그대로 반사(정상 인코딩)되면 'info/tentative 입력 반사 표면'으로만 보고한다(오탐 억제).
+          const tok = 'sx' + rnd().replace(/[^a-z0-9]/g, '');
+          const rr = await ctx.guard.httpGet(buildParamUrl(base, t, encodeURIComponent(`"'><${tok}>`)));
+          if (rr && rr.body && rr.body.includes(tok)) {
+            const ct = (rr.headers['content-type'] || '').toLowerCase();
+            const isHtml = ct.includes('html') || (!ct && /<html|<!doctype/i.test(rr.body.slice(0, 300)));
+            const rawSurvive = rr.body.includes(`<${tok}>`) || rr.body.includes(`"'><`);
+            if (rawSurvive && isHtml) {
+              findings.push({ ...mk('dast', 'high', `반사형 XSS 가능성(미인코딩 반사): ${t.path}?${t.param}`, ctx.asset.value + t.path,
+                `파라미터 '${t.param}' 의 특수문자(< " ')가 인코딩 없이 HTML 컨텍스트에 반사됩니다(전수 크롤로 발견). 반사형 XSS 표면입니다(익스플로잇 미수행).`,
+                `raw breakout survived via ${t.param} (<${tok}> 미인코딩 반사)`, '컨텍스트별 출력 인코딩·입력 검증·CSP 를 적용하십시오.'),
+                owasp: 'A03:2021', cwe: 'CWE-79', confidence: 'firm', references: ['https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html'] });
+            } else {
+              findings.push({ ...mk('dast', 'info', `입력값 반사 표면(인코딩 여부 미확인): ${t.path}?${t.param}`, ctx.asset.value + t.path,
+                `파라미터 '${t.param}' 가 응답에 반사되나 특수문자는 인코딩된 것으로 보입니다(content-type=${ct || '?'}). 즉시 실행 위험은 낮으나 JS/속성 컨텍스트 반사는 별도 검토가 필요합니다.`,
+                `marker echoed via ${t.param} (특수문자 미생존)`, '컨텍스트별 인코딩을 유지하고 추가 컨텍스트(JS/속성/URL)를 점검하십시오.'),
+                owasp: 'A03:2021', cwe: 'CWE-79', confidence: 'tentative' });
+            }
+          }
+          // SQL 오류 노출 — 무따옴표 control 대비 차분(control 에 없고 quote 에만 DB 오류가 나타날 때만).
+          const ctrl = await ctx.guard.httpGet(buildParamUrl(base, t, encodeURIComponent(t.value)));
+          const qr = await ctx.guard.httpGet(buildParamUrl(base, t, encodeURIComponent(t.value + "'")));
+          if (qr && qr.body) {
+            const eq = matchSqlError(qr.body);
+            const ec = ctrl && ctrl.body ? matchSqlError(ctrl.body) : null;
+            if (eq && !ec) findings.push({ ...mk('dast', 'high', `DB SQL 오류 노출(SQLi 표면): ${t.path}?${t.param} [${eq}]`, ctx.asset.value + t.path,
+              `파라미터 '${t.param}' 에 단일 따옴표 입력 시에만 ${eq} 오류가 노출됩니다(무따옴표 control 에는 없음 → 입력이 질의에 합쳐지는 단서). SQL 인젝션 표면입니다(익스플로잇 미수행).`,
+              qr.body.slice(0, 100).replace(/\s+/g, ' '), '파라미터화 쿼리(Prepared Statement)를 사용하고 상세 DB 오류를 숨기십시오.'),
+              owasp: 'A03:2021', cwe: 'CWE-89', confidence: 'firm', references: ['https://owasp.org/Top10/A03_2021-Injection/'] });
+          }
+        }
+      } catch (e) { ctx.log(`dast: 전수 크롤 오류 — ${(e as Error).message}`); }
+    }
+
     // OWASP LLM Top 10 (2025) — LLM/AI 앱 표면 비파괴 점검(헬퍼 내부 신호 게이트로 무관 사이트는 즉시 생략).
     try {
       findings.push(...await runLlmScan(ctx, base, ctx.asset.value, root, baseStatus, baseBody));
@@ -543,10 +594,10 @@ export const dastScanner: Scanner = {
       ctx.log(`dast: LLM 점검 오류 — ${(e as Error).message}`);
     }
 
-    // 활성(침투) 검증 — 게이트에서 aggressive + 4-eyes 통과 시에만 true. 취약점을 실제 트리거해 확정(비파괴 한정).
+    // 활성(침투) 검증 — 게이트에서 aggressive + 4-eyes 통과 시에만 true. 크롤로 발견한 전 파라미터에 확정 점검 적용.
     if (ctx.active) {
       try {
-        findings.push(...await runActiveConfirmation(ctx, base, ctx.asset.value, root, baseStatus, baseBody));
+        findings.push(...await runActiveConfirmation(ctx, base, ctx.asset.value, root, baseStatus, baseBody, crawlResult?.params));
       } catch (e) {
         ctx.log(`dast: 활성 검증 오류 — ${(e as Error).message}`);
       }

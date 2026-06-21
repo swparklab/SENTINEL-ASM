@@ -18,6 +18,7 @@ import type { Finding } from '../../types.js';
 import type { ScanContext } from './types.js';
 import { mk } from './asm.js';
 import { analyzePii } from './apiexposure.js';
+import { buildParamUrl, type ParamTarget as CrawlParam } from './crawl.js';
 
 type HttpResp = { ok: boolean; status: number; headers: Record<string, string>; body: string };
 
@@ -27,6 +28,7 @@ const REF_IDOR = ['https://owasp.org/Top10/A01_2021-Broken_Access_Control/', 'ht
 
 export async function runActiveConfirmation(
   ctx: ScanContext, base: string, host: string, root: HttpResp, baseStatus: number, baseBody: string,
+  extraParams?: CrawlParam[],
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
   // 방어심도: 게이트/오케스트레이터가 active⟹aggressive+4-eyes 를 보장하지만, 소비자 단에서도 강도를 재확인한다.
@@ -38,6 +40,17 @@ export async function runActiveConfirmation(
   const ok = (r: HttpResp | null): r is HttpResp => !!r && r.status === 200 && !!r.body && !isSoft404(r);
 
   const targets = collectParamTargets(root.body, base);
+  // 전수 크롤로 발견한 파라미터까지 확정 점검 대상에 병합(중복 제거) — 홈페이지뿐 아니라 앱 전체 표면을 능동 확정.
+  if (extraParams?.length) {
+    const seen = new Set(targets.map((t) => t.path + '?' + t.param));
+    for (const e of extraParams) {
+      const key = e.path + '?' + e.param;
+      if (seen.has(key) || targets.length >= 25) continue;
+      seen.add(key);
+      // 형제 파라미터를 보존하는 URL 빌더(buildParamUrl)로 능동 확정 표적 추가.
+      targets.push({ path: e.path, param: e.param, orig: e.value || '1', url: (encVal) => buildParamUrl(base, e, encVal) });
+    }
+  }
   ctx.log(`active: 파라미터 표적 ${targets.length}개로 침투 확정 시작(비파괴: 데이터 변경·DoS·brute-force 없음)`);
 
   // ── (1) Boolean 기반 SQLi 확정 ──
@@ -45,7 +58,7 @@ export async function runActiveConfirmation(
   for (const t of targets) {
     if (sqliDone >= 3) break;
     const orig = await get(t.url(enc(t.orig)));
-    if (!ok(orig)) continue;
+    if (!ok(orig)) { sqliDone++; continue; }   // 표적당 1회 카운트 — 비-200 표적이 많아도 cap(3)을 실제로 강제.
     // 베이스라인 안정성 게이트: 동일 입력을 2회 호출해 자기차분이 작을 때만(결정적 페이지) 차분을 신뢰한다.
     // 타임스탬프·랜덤배너·CSRF 토큰 등 비결정적 본문에서의 boolean 오탐을 차단한다.
     const orig2 = await get(t.url(enc(t.orig)));
