@@ -10,6 +10,7 @@ import { id, now } from '../../util.js';
 import type { Asset, Consent, ScanIntensity, ScanJob } from '../../types.js';
 import { parseManifest, matchSbom, staticFileAudit, scanLicenses } from '../scanners/sbom.js';
 import { runSast } from '../scanners/sast.js';
+import { runIacScan } from '../scanners/iac.js';
 import { id as genId } from '../../util.js';
 import { prioritize } from '../risk/scoring.js';
 import { mapCompliance } from '../compliance/mapping.js';
@@ -39,6 +40,7 @@ export function scanSoftwareProject(
       ...staticFileAudit(filename, content),
       ...scanLicenses(filename, content),
       ...(isSrc ? runSast(filename, content) : []),
+      ...runIacScan(filename, content),   // IaC/CSPM·KSPM (Terraform·K8s·Dockerfile·compose·CFN)
     ];
     fileResults.push({ filename, format, componentCount: components.length, findingCount: fFindings.length });
     // 발견 중복 제거: module:title:target 으로 동일 취약점 합산
@@ -88,6 +90,7 @@ export function scanSoftware(tenantId: string, actor: string, filename: string, 
     ...staticFileAudit(filename, content),
     ...scanLicenses(filename, content),
     ...(isSrc ? runSast(filename, content) : []),
+    ...runIacScan(filename, content),   // IaC/CSPM·KSPM
   ];
   // 매니페스트 미인식/0건 가시화 (커버리지 공백 투명 고지)
   if (format === '미인식' && !findings.length) {

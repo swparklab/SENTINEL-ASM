@@ -18,6 +18,8 @@ import { authorizeTarget, runProbe, runPlaybook, recordPentestJob, PLAYBOOKS, ty
 import { EgressViolation } from './modules/scanners/egress.js';
 import { aiStatus, analyzeFindings } from './modules/ai/index.js';
 import { runSast } from './modules/scanners/sast.js';
+import { runIacScan } from './modules/scanners/iac.js';
+import { mapCompliance } from './modules/compliance/mapping.js';
 import { checkHibpDomain } from './modules/scanners/cloud.js';
 import { buildReport, reportToMarkdown, reportToHtml } from './modules/reports/report.js';
 import { aggregateRisk } from './modules/risk/scoring.js';
@@ -235,6 +237,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
       const findings = runSast(v.data.filename, v.data.content);
       audit({ tenantId: req.auth!.tenantId, actor: req.auth!.email, action: 'quick.sast', target: v.data.filename, outcome: 'info', reason: `${findings.length}건 탐지` });
+      return reply.code(200).send({ filename: v.data.filename, findings, count: findings.length });
+    });
+
+    // 1c-2) IaC/CSPM·KSPM 점검 — Terraform·K8s·Dockerfile·compose·CloudFormation 보안 형상 분석(비파괴)
+    api.post('/api/quick/iac', { preHandler: requirePermission('scan:create') }, async (req, reply) => {
+      const v = validate(z.object({ filename: z.string().min(1), content: z.string().min(1) }), req.body);
+      if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
+      const findings = mapCompliance(runIacScan(v.data.filename, v.data.content));
+      audit({ tenantId: req.auth!.tenantId, actor: req.auth!.email, action: 'quick.iac', target: v.data.filename, outcome: 'info', reason: `${findings.length}건 탐지` });
       return reply.code(200).send({ filename: v.data.filename, findings, count: findings.length });
     });
 

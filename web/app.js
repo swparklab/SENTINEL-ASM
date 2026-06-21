@@ -1031,6 +1031,24 @@ function Quick({ user, toast, onOpenReport }) {
     setSastFilename(f.name); setSastCode(await f.text());
   };
 
+  // ── IaC/CSPM 상태 ──
+  const [iacCode, setIacCode] = useState('');
+  const [iacFilename, setIacFilename] = useState('main.tf');
+  const [iacResult, setIacResult] = useState(null);
+  const [iacBusy, setIacBusy] = useState(false);
+  const scanIac = async () => {
+    if (!iacCode.trim()) return toast('IaC 파일 내용을 붙여넣거나 파일을 선택하세요.', true);
+    setIacBusy(true); setIacResult(null);
+    const r = await api('POST', '/api/quick/iac', { filename: iacFilename, content: iacCode });
+    setIacBusy(false);
+    if (r.status === 200) { setIacResult(r.json); toast(`IaC/CSPM 완료 — ${r.json.count}건 탐지`); }
+    else toast(r.json?.message || 'IaC 점검 실패', true);
+  };
+  const onIacFile = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    setIacFilename(f.name); setIacCode(await f.text());
+  };
+
   // ── 인증 세션 상태 ──
   const [authedTarget, setAuthedTarget] = useState('');
   const [authedCookie, setAuthedCookie] = useState('');
@@ -1305,6 +1323,7 @@ function Quick({ user, toast, onOpenReport }) {
         <button class=${tab === 'domain' ? 'on' : ''} onClick=${() => setTab('domain')}>🔗 도메인 · URL</button>
         <button class=${tab === 'file' ? 'on' : ''} onClick=${() => setTab('file')}>📂 소프트웨어 프로젝트</button>
         <button class=${tab === 'sast' ? 'on' : ''} onClick=${() => setTab('sast')}>🔬 소스코드 SAST</button>
+        <button class=${tab === 'iac' ? 'on' : ''} onClick=${() => setTab('iac')}>☁️ IaC·클라우드(CSPM)</button>
         <button class=${tab === 'authed' ? 'on' : ''} onClick=${() => setTab('authed')}>🔐 인증 세션 점검</button>
         <button class=${tab === 'pentest' ? 'on' : ''} onClick=${() => setTab('pentest')}>🧪 수동 점검</button>
         <button class=${tab === 'intel' ? 'on' : ''} onClick=${() => setTab('intel')}>🕵️ 위협 인텔</button>
@@ -1458,6 +1477,28 @@ function Quick({ user, toast, onOpenReport }) {
           </div>
           <div style=${{ margin:'10px 0' }}><${ScoreBadge} findings=${sastResult.findings} /></div>
           <${FindingsPanel} findings=${sastResult.findings} />
+        </div>`}
+      `}
+
+      ${tab === 'iac' && html`
+        <div class="filebox">
+          <h3 style=${{ margin:'0 0 10px' }}>☁️ IaC·클라우드 보안 형상(CSPM·KSPM)</h3>
+          <div class="muted" style=${{ marginBottom:10, fontSize:13 }}>Terraform·Kubernetes·Dockerfile·docker-compose·CloudFormation 을 붙여넣거나 업로드하면 퍼블릭 노출·과도한 권한·미암호화·하드코딩 시크릿 등 <b>클라우드 형상 오류</b>를 라인 단위 근거와 함께 즉시 분석합니다. (원격 트래픽 없음 · 비파괴)</div>
+          <div class="row">
+            <div style=${{ flex:0 }}><label>파일명(종류 감지용)</label><input value=${iacFilename} onChange=${e=>setIacFilename(e.target.value)} placeholder="main.tf / deployment.yaml / Dockerfile" /></div>
+            <div style=${{ flex:0 }}><label>파일 업로드</label><input type="file" onChange=${onIacFile} /></div>
+          </div>
+          <label>IaC 내용 붙여넣기</label>
+          <textarea rows="10" class="mono" value=${iacCode} placeholder=${'# 예) Terraform\nresource "aws_s3_bucket" "b" {\n  acl = "public-read"\n}'} onChange=${e=>setIacCode(e.target.value)}></textarea>
+          <div style=${{ marginTop:10, textAlign:'center' }}><button class="primary" onClick=${scanIac} disabled=${iacBusy}>${iacBusy ? '분석 중…' : '🔍 IaC/CSPM 분석'}</button></div>
+        </div>
+        ${iacResult && html`<div class="panel result-card" style=${{ marginTop:14 }}>
+          <div style=${{ display:'flex', justifyContent:'space-between', flexWrap:'wrap', gap:8 }}>
+            <b>IaC/CSPM 결과</b> <span class="muted">· ${iacResult.filename} · ${iacResult.count}건 탐지</span>
+            <${FixPromptButton} findings=${iacResult.findings} target=${iacResult.filename} />
+          </div>
+          <div style=${{ margin:'10px 0' }}><${ScoreBadge} findings=${iacResult.findings} /></div>
+          <${FindingsPanel} findings=${iacResult.findings} />
         </div>`}
       `}
 
