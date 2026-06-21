@@ -4,6 +4,7 @@
  * 여기에 EPSS(익스플로잇 확률)·KEV(실제 악용) 를 반영해 우선순위 큐를 산출한다.
  */
 import type { Asset, Finding } from '../../types.js';
+import { assignCvss } from './cvss.js';
 
 const SEVERITY_BASE: Record<Finding['severity'], number> = {
   info: 1, low: 3, medium: 5.5, high: 8, critical: 9.5,
@@ -69,9 +70,12 @@ export function scoreFinding(f: Finding, asset: Asset): number {
   return Math.min(100, Math.round(score * 10));
 }
 
-/** 발견사항 배열에 위험 점수를 부여하고 우선순위 내림차순으로 정렬. */
+/** 발견사항 배열에 위험 점수를 부여하고 우선순위 내림차순으로 정렬. CVE 가 아닌 발견에는 CVSS 3.1 을 자동 산정한다. */
 export function prioritize(findings: Finding[], asset: Asset): Finding[] {
-  for (const f of findings) f.riskScore = scoreFinding(f, asset);
+  for (const f of findings) {
+    if (f.cvss === undefined) { const c = assignCvss(f); f.cvss = c.score; f.cvssVector = c.vector; }   // CVE 피드 점수 없으면 CWE/심각도 기반 CVSS 3.1 추정(벡터 보존)
+    f.riskScore = scoreFinding(f, asset);
+  }
   return findings.sort((a, b) => (b.riskScore ?? 0) - (a.riskScore ?? 0));
 }
 

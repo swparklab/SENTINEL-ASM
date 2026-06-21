@@ -10,6 +10,7 @@ import type { Scanner, ScanContext } from './types.js';
 import { mk } from './asm.js';
 import { runActiveConfirmation } from './active.js';
 import { runLlmScan } from './llm.js';
+import { runExposureScan } from './exposure.js';
 import { crawlSurface, buildParamUrl, type CrawlResult } from './crawl.js';
 
 export const dastScanner: Scanner = {
@@ -377,16 +378,30 @@ export const dastScanner: Scanner = {
         }
       }
 
-      // [17] GraphQL 인트로스펙션/엔드포인트 노출 (비파괴 GET, 스키마 노출만)
+      // [17] GraphQL 엔드포인트 + 인트로스펙션 실제 확인 (비파괴 GET, 읽기 전용)
       for (const gp of ['/graphql', '/api/graphql', '/v1/graphql']) {
         const r = await ctx.guard.httpGet(base + gp + '?query=' + encodeURIComponent('{__typename}'));
-        if (r && r.status === 200 && /__typename|"data"\s*:|GraphQL|graphql-playground|"errors"\s*:.*query/i.test(r.body)) {
-          findings.push({ ...mk('dast', 'low', `GraphQL 엔드포인트 노출: ${gp}`, ctx.asset.value + gp,
-            'GraphQL 엔드포인트가 응답합니다. 인트로스펙션이 켜져 있으면 전체 스키마가 노출될 수 있습니다.',
-            r.body.slice(0, 80).replace(/\s+/g, ' '),
-            '운영에서 인트로스펙션을 비활성화하고 쿼리 깊이/복잡도 제한과 인증을 적용하십시오.'),
-            owasp: 'A05:2021', cwe: 'CWE-200', confidence: 'firm',
-            references: ['https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html'] });
+        // GraphQL 고유 신호만(일반 JSON 의 "data": 단독 매칭 제외 — 오탐 억제).
+        if (r && r.status === 200 && /__typename|graphql-playground|"data"\s*:\s*\{\s*"__typename"|"errors"\s*:\s*\[[\s\S]{0,80}"(?:message|locations|extensions)"/i.test(r.body)) {
+          // 인트로스펙션 쿼리를 실제로 보내 스키마가 반환되는지 확인(켜져 있으면 medium).
+          const introQ = '{__schema{queryType{name} types{name kind}}}';
+          const ir = await ctx.guard.httpGet(base + gp + '?query=' + encodeURIComponent(introQ));
+          const introOn = !!ir && ir.status === 200 && /"__schema"\s*:\s*\{|"queryType"|"types"\s*:\s*\[/.test(ir.body) && !/"errors".*introspection|introspection.*disabled/i.test(ir.body);
+          if (introOn) {
+            findings.push({ ...mk('dast', 'medium', `GraphQL 인트로스펙션 활성화: ${gp}`, ctx.asset.value + gp,
+              'GraphQL 인트로스펙션이 켜져 있어 전체 스키마(타입·쿼리·뮤테이션)가 인증 없이 노출됩니다. 공격자가 내부 데이터 모델·숨은 작업을 매핑할 수 있습니다.',
+              `${gp}?query={__schema...} → 200, 스키마 반환됨`,
+              '운영에서 GraphQL 인트로스펙션을 비활성화하고, 쿼리 깊이/복잡도 제한·인증·레이트리밋을 적용하십시오.'),
+              owasp: 'A05:2021', cwe: 'CWE-200', confidence: 'firm',
+              references: ['https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html'] });
+          } else {
+            findings.push({ ...mk('dast', 'low', `GraphQL 엔드포인트 노출: ${gp}`, ctx.asset.value + gp,
+              'GraphQL 엔드포인트가 응답합니다(인트로스펙션은 비활성/차단으로 보임). 쿼리 깊이/복잡도·인증 점검이 필요합니다.',
+              r.body.slice(0, 80).replace(/\s+/g, ' '),
+              '쿼리 깊이/복잡도 제한과 인증·레이트리밋을 적용하십시오.'),
+              owasp: 'A05:2021', cwe: 'CWE-200', confidence: 'tentative',
+              references: ['https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html'] });
+          }
           break;
         }
       }
@@ -592,6 +607,13 @@ export const dastScanner: Scanner = {
       findings.push(...await runLlmScan(ctx, base, ctx.asset.value, root, baseStatus, baseBody));
     } catch (e) {
       ctx.log(`dast: LLM 점검 오류 — ${(e as Error).message}`);
+    }
+
+    // 노출 정밀 점검 — 클라우드 버킷/Firebase 참조·클라이언트 시크릿/API키·SourceMap·robots 민감경로·백업파일·디버그모드.
+    try {
+      findings.push(...await runExposureScan(ctx, base, ctx.asset.value, root, baseStatus, baseBody));
+    } catch (e) {
+      ctx.log(`dast: 노출 점검 오류 — ${(e as Error).message}`);
     }
 
     // 활성(침투) 검증 — 게이트에서 aggressive + 4-eyes 통과 시에만 true. 크롤로 발견한 전 파라미터에 확정 점검 적용.
@@ -813,7 +835,8 @@ function matchSecretLeak(b: string): { label: string; evidence: string } | null 
   ];
   for (const r of rules) {
     const m = b.match(r.re);
-    if (m) return { label: r.label, evidence: m[0].slice(0, 12) + '…(redacted)' };
+    // 제공자 prefix(앞 4~6자)만 남기고 나머지는 마스킹. JWT 는 헤더 segment 만 노출.
+    if (m) { const v = m[0]; const ev = r.label === 'JWT' ? v.split('.')[0] + '.…(redacted)' : v.slice(0, 6) + '…(redacted)'; return { label: r.label, evidence: ev }; }
   }
   return null;
 }
