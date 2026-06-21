@@ -856,6 +856,16 @@ function FindingList({ findings }) {
         <span class="pill mono">${f.target}</span>
       </div>
 
+      <div class="evidence-box">
+        <div class="evidence-h">🔬 관측 근거 — 왜 이렇게 판단했나 (검증 가능)</div>
+        <div class="evidence-row"><span class="evidence-k">점검 대상</span><span class="mono">${f.target}</span></div>
+        ${f.evidence
+          ? html`<div class="evidence-row"><span class="evidence-k">관측값</span><pre class="evidence">${f.evidence}</pre></div>`
+          : html`<div class="evidence-row"><span class="evidence-k">관측값</span><span class="muted" style=${{ fontSize: 12 }}>이 항목은 휴리스틱/부재 단서로, 별도 관측 문자열이 없습니다(신뢰도 ${f.confidence || 'tentative'}).</span></div>`}
+        ${(f.owasp || f.cwe || f.confidence) && html`<div class="evidence-row"><span class="evidence-k">분류·신뢰도</span><span style=${{ fontSize: 12 }}>${[f.owasp, f.cwe, f.confidence && `신뢰도 ${f.confidence}`].filter(Boolean).join(' · ')}</span></div>`}
+        ${f.references?.length && html`<div class="evidence-row"><span class="evidence-k">참고 표준</span><span style=${{ fontSize: 11, wordBreak: 'break-all' }}>${f.references.map((u, i) => html`<a key=${i} href=${u} target="_blank" rel="noreferrer" class="evidence-ref">${u}</a>`)}</span></div>`}
+      </div>
+
       <div class="action">🔧 <b>조치</b> ${e.action}</div>
 
       <div class="why-pop">

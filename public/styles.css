@@ -197,7 +197,16 @@ tbody tr:hover td { background: var(--bg-soft); }
 .pill { font-size: 11px; padding: 2px 8px; border: 1px solid var(--line2); border-radius: 999px; color: var(--muted); background: #fff; }
 .bar { height: 8px; border-radius: 999px; background: var(--panel2); overflow: hidden; }
 .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--low), var(--med), var(--high), var(--crit)); }
-pre.evidence { background: var(--bg-soft); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; font-size: 11px; color: var(--text); }
+pre.evidence { background: var(--bg-soft); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; font-size: 11px; color: var(--text); margin: 0; white-space: pre-wrap; word-break: break-word; }
+.evidence-box { margin: 8px 0; border: 1px solid var(--line); border-left: 3px solid #38bdf8; border-radius: 8px; background: rgba(56,189,248,0.05); padding: 8px 10px; }
+.evidence-h { font-size: 12px; font-weight: 700; color: #38bdf8; margin-bottom: 6px; }
+.evidence-row { display: flex; gap: 8px; align-items: flex-start; margin: 3px 0; font-size: 12px; }
+.evidence-k { flex: 0 0 72px; font-weight: 700; color: var(--muted); font-size: 11px; padding-top: 2px; }
+.evidence-row .mono { word-break: break-all; }
+.evidence-row pre.evidence { flex: 1; min-width: 0; }
+.evidence-ref { display: block; color: #8fa3c8; text-decoration: none; }
+.evidence-ref:hover { text-decoration: underline; }
+@media (max-width: 560px) { .evidence-row { flex-direction: column; gap: 2px; } .evidence-k { flex-basis: auto; } }
 .result-card { max-width: 720px; margin: 22px auto 0; }
 
 /* ───────── 프로젝트 폴더 업로드 UI ───────── */
