@@ -22,6 +22,7 @@ import { runIacScan } from './modules/scanners/iac.js';
 import { mapCompliance } from './modules/compliance/mapping.js';
 import { checkHibpDomain } from './modules/scanners/cloud.js';
 import { buildReport, reportToMarkdown, reportToHtml } from './modules/reports/report.js';
+import { buildIntelligence } from './modules/reports/intelligence.js';
 import { aggregateRisk } from './modules/risk/scoring.js';
 import type { Asset, Consent } from './types.js';
 
@@ -450,6 +451,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (job.status !== 'completed') return reply.code(409).send({ error: 'not_ready', message: `작업 상태: ${job.status}` });
       audit({ tenantId: job.tenantId, actor: req.auth!.email, action: 'report.view', target: job.assetId, outcome: 'info', meta: { jobId: job.id } });
       return buildReport(job);
+    });
+
+    // AI Pentest Report 인텔리전스 — MITRE ATT&CK 매핑·예상 피해금액(FAIR)·Attack Path·재현 절차(후처리 분석, 대상 미발신).
+    api.get('/api/scans/:id/intelligence', { preHandler: requirePermission('report:read') }, async (req, reply) => {
+      const job = repos.scanJobs.get((req.params as any).id, req.auth!.tenantId);
+      if (!job) return reply.code(404).send({ error: 'not_found' });
+      if (job.status !== 'completed') return reply.code(409).send({ error: 'not_ready', message: `작업 상태: ${job.status}` });
+      const asset = repos.assets.get(job.assetId, req.auth!.tenantId);
+      return reply.send({ jobId: job.id, intelligence: buildIntelligence(job.findings ?? [], asset?.businessCriticality ?? 'high') });
     });
 
     api.get('/api/scans/:id/report.md', { preHandler: requirePermission('report:read') }, async (req, reply) => {

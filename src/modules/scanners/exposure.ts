@@ -104,6 +104,29 @@ export async function runExposureScan(ctx: ScanContext, base: string, host: stri
       }
     }
 
+    // ── 로그 파일 노출 ──
+    for (const lp of ['/error.log', '/access.log', '/app.log', '/debug.log', '/logs/error.log', '/storage/logs/laravel.log', '/log/production.log']) {
+      let r: HttpResp | null = null;
+      try { r = await ctx.guard.httpGet(base + lp, { timeoutMs: 6000 }); } catch { continue; }
+      if (r && r.status === 200 && r.body && !isSoft404(r) && /\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}|\bERROR\b|\bWARN\b|Exception|stack trace|\d{1,3}(\.\d{1,3}){3}\b/i.test(r.body.slice(0, 500))) {
+        findings.push(f('high', `로그 파일 노출: ${lp}`, host + lp,
+          '애플리케이션/접근 로그가 외부에서 접근 가능합니다. 내부 경로·사용자 활동·오류 스택·토큰/세션 등이 유출될 수 있습니다.',
+          `${lp} → 200 (${r.body.length}B, 로그 형식)`, '로그 파일을 웹 루트 밖으로 옮기고 접근을 차단하십시오.', 'A05:2021', 'CWE-532', 'firm'));
+        break;
+      }
+    }
+
+    // ── Git 커밋 이력 노출(.git/logs/HEAD) ──
+    try {
+      const gh = await ctx.guard.httpGet(base + '/.git/logs/HEAD', { timeoutMs: 6000 });
+      // reflog 형식(구해시 신해시 작성자…)을 요구해 본문 내 우연한 단일 SHA-1 매칭을 배제.
+      if (gh && gh.status === 200 && gh.body && /^[0-9a-f]{40} [0-9a-f]{40} /m.test(gh.body) && !/<html/i.test(gh.body)) {
+        findings.push(f('high', 'Git 커밋 이력 노출: /.git/logs/HEAD', host + '/.git/logs/HEAD',
+          'Git 커밋 로그가 노출되어 커밋 해시·작성자·이메일·변경 이력이 드러나고, .git 디렉터리로 전체 소스 복원이 가능할 수 있습니다.',
+          gh.body.slice(0, 100).replace(/\s+/g, ' '), '.git 디렉터리를 웹 루트에서 제거하고 접근을 차단하십시오(배포 시 .git 제외).', 'A05:2021', 'CWE-527', 'firm'));
+      }
+    } catch { /* */ }
+
     // ── 디버그 모드/프레임워크 디버그 노출 ──
     const dbg = matchDebug(root.body + JSON.stringify(root.headers));   // 서버 렌더 HTML·헤더만(번들 JS 제외 — 오탐 억제)
     if (dbg) {

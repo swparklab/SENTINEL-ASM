@@ -144,11 +144,11 @@ export const accessScanner: Scanner = {
       for (const mv of variants) {
         const r = await ctx.guard.httpGet(base + mv.variant);
         if (r && isGenuineBypass(r)) {
-          findings.push(bac('high', `접근통제 우회: ${prot.path} (${mv.how})`, host + prot.path,
-            `차단(${prot.status})된 경로가 경로 표기 변형("${mv.variant}")만으로, 홈/공통 셸과도 다른 콘텐츠를 200 으로 반환합니다. 주소창을 살짝 바꾸면 통제가 우회됩니다.`,
+          findings.push(bac('high', `접근통제 우회 가능성: ${prot.path} (${mv.how})`, host + prot.path,
+            `차단(${prot.status})된 경로가 경로 표기 변형("${mv.variant}")만으로 홈/공통 셸과도 다른 콘텐츠를 200 으로 반환합니다. 통제 우회 가능성이 있으나, 경로 정규화로 정상 응답이 반환된 경우일 수도 있어 보호 콘텐츠 실제 반환 여부를 수동 검증하십시오.`,
             `${prot.status} → 200 via "${mv.variant}" (본문이 루트·soft404 베이스라인과 상이)`,
             '인가 판정을 정규화된 경로/리소스 기준으로 일관 적용하고, 리버스프록시·애플리케이션 계층 간 경로 정규화 불일치(슬래시·대소문자·인코딩)를 제거하십시오.',
-            'CWE-639', 'firm'));
+            'CWE-639', 'tentative'));
           break; // 경로당 1건이면 충분
         }
       }
@@ -164,11 +164,11 @@ export const accessScanner: Scanner = {
         for (const hv of headerBypass) {
           const r = await ctx.guard.httpGet(base + prot.path, { headers: hv.headers });
           if (r && isGenuineBypass(r)) {
-            findings.push(bac('high', `접근통제 우회: ${prot.path} (${hv.how})`, host + prot.path,
-              `차단(${prot.status})된 경로가 요청 헤더 변조(${hv.how})로, 홈/공통 셸과도 다른 콘텐츠를 200 으로 반환합니다. 클라이언트가 보낸 신뢰 불가 헤더로 통제가 우회됩니다.`,
+            findings.push(bac('high', `접근통제 우회 가능성: ${prot.path} (${hv.how})`, host + prot.path,
+              `차단(${prot.status})된 경로가 요청 헤더 변조(${hv.how})로 홈/공통 셸과도 다른 콘텐츠를 200 으로 반환합니다. 신뢰 불가 헤더로 통제가 우회될 가능성이 있으나, 정상 응답일 수도 있어 보호 콘텐츠 실제 반환 여부를 수동 검증하십시오.`,
               `${prot.status} → 200 via ${hv.how} (본문이 루트·soft404 베이스라인과 상이)`,
               '신뢰할 수 없는 요청 헤더(X-Original-URL/X-Rewrite-URL/X-Forwarded-* 등)로 접근통제·내부 라우팅을 우회할 수 없도록 게이트웨이에서 제거·무시하십시오.',
-              'CWE-290', 'firm'));
+              'CWE-290', 'tentative'));
             break;
           }
         }
@@ -332,11 +332,11 @@ export const accessScanner: Scanner = {
         for (const hv of moreHeaderBypass) {
           const r = await ctx.guard.httpGet(base + prot.path, { headers: hv.headers });
           if (r && isGenuineBypass(r)) {
-            findings.push(bac('high', `접근통제 우회: ${prot.path} (${hv.how})`, host + prot.path,
-              `차단(${prot.status})된 경로가 신뢰 불가 요청 헤더 변조(${hv.how})로, 홈/공통 셸과도 다른 콘텐츠를 200 으로 반환합니다. 클라이언트 제어 헤더로 통제가 우회됩니다.`,
+            findings.push(bac('high', `접근통제 우회 가능성: ${prot.path} (${hv.how})`, host + prot.path,
+              `차단(${prot.status})된 경로가 신뢰 불가 요청 헤더 변조(${hv.how})로 홈/공통 셸과도 다른 콘텐츠를 200 으로 반환합니다. 클라이언트 제어 헤더로 통제가 우회될 가능성이 있으나, 정상 응답일 수도 있어 보호 콘텐츠 실제 반환 여부를 수동 검증하십시오.`,
               `${prot.status} → 200 via ${hv.how} (본문이 루트·soft404 베이스라인과 상이)`,
               '게이트웨이에서 X-Forwarded-*/X-Real-IP/X-Client-IP/X-Original-URL/Referer 기반 인가 우회를 차단하고, 신뢰 경계 내부에서만 설정된 헤더만 신뢰하십시오.',
-              'CWE-290', 'firm'));
+              'CWE-290', 'tentative'));
             break;
           }
         }
@@ -553,6 +553,15 @@ export const accessScanner: Scanner = {
               `JWT header(base64url decoded): {"alg":"${jwt.alg}"${jwt.typ ? `,"typ":"${jwt.typ}"` : ''}}`,
               'JWT 는 강한 비대칭 서명(RS/ES) 또는 충분히 긴 비밀키의 HMAC 으로 서명·검증하고, alg=none 을 거부하며 서버가 허용 alg 를 고정하십시오.'),
               owasp: 'A02:2021', cwe: crit ? 'CWE-347' : 'CWE-327', confidence: 'firm', references: REF_A01 });
+            // JWT 페이로드 클레임 검증(만료 exp 부재 — 토큰 무기한 유효 위험). 비파괴 디코딩만.
+            const claims = decodeJwtPayload(setCookie);
+            if (claims && claims.exp === undefined) {
+              findings.push({ ...mk('access', 'medium', 'JWT 만료(exp) 클레임 부재 — 무기한 유효 토큰', host,
+                'Set-Cookie 의 JWT 페이로드에 만료(exp) 클레임이 없습니다. 탈취된 토큰이 영구히 유효해 세션 무효화·재발급 통제가 어렵습니다(비파괴 디코딩).',
+                `JWT payload claims: ${Object.keys(claims).slice(0, 8).join(', ') || '(없음)'} (exp 없음)`,
+                'JWT 에 짧은 exp(만료)와 가능하면 nbf/iat 를 포함하고, 서버에서 만료를 강제 검증하며 폐기 목록(jti)을 운영하십시오.'),
+                owasp: 'A07:2021', cwe: 'CWE-613', confidence: 'firm', references: REF_A01 });
+            }
           }
         }
       }
@@ -707,6 +716,18 @@ function detectChallengeSignature(body: string, headers: Record<string, string>)
   if (/hcaptcha\.com|h-captcha/i.test(body)) return 'hCaptcha';
   if (/challenges\.cloudflare\.com\/turnstile|cf-turnstile/i.test(body)) return 'Cloudflare Turnstile';
   return null;
+}
+
+/** Set-Cookie 의 JWT 페이로드(2번째 세그먼트)를 비파괴로 디코딩해 클레임 객체를 반환. */
+function decodeJwtPayload(setCookie: string): Record<string, unknown> | null {
+  const m = /eyJ[A-Za-z0-9_-]{4,}\.([A-Za-z0-9_-]{4,})\.[A-Za-z0-9_-]*/.exec(setCookie);
+  if (!m) return null;
+  try {
+    const b64 = m[1]!.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64 + '==='.slice((b64.length + 3) % 4);
+    const obj = JSON.parse(Buffer.from(pad, 'base64').toString('utf8')) as Record<string, unknown>;
+    return (obj && typeof obj === 'object') ? obj : null;
+  } catch { return null; }
 }
 
 /** Set-Cookie 문자열에서 JWT 형태 값의 헤더 alg 를 비파괴로 디코딩(첫 세그먼트 base64url). */

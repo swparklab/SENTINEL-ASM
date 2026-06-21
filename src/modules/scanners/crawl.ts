@@ -27,6 +27,20 @@ export async function crawlSurface(ctx: ScanContext, base: string, host: string,
   const queue: string[] = ['/'];
   let processed = 0;   // 발신 GET 시도 수(루트 포함) — maxPages 상한의 일관된 의미.
 
+  // sitemap.xml 시드 — 링크로 연결되지 않은 페이지까지 발견(전수 커버리지).
+  for (const sp of ['/sitemap.xml', '/sitemap_index.xml']) {
+    try {
+      const sm = await ctx.guard.httpGet(origin + sp, { timeoutMs: 6000 });
+      if (!sm || sm.status !== 200 || !/<urlset|<sitemapindex|<loc>/i.test(sm.body)) continue;
+      for (const m of sm.body.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)) {
+        const norm = toPath(m[1]!, origin, host);
+        if (!norm) continue;
+        const p = norm.split('?')[0]!;
+        if (!seen.has(p) && !STATIC_RE.test(p) && queue.length < opts.maxPages) { seen.add(p); queue.push(p); }  // sitemap 시드는 maxPages 내로 캡(링크 BFS 공간 확보)
+      }
+    } catch { /* */ }
+  }
+
   while (queue.length && processed < opts.maxPages) {
     const path = queue.shift()!;
     processed++;

@@ -8,6 +8,7 @@ import { repos } from '../../db/store.js';
 import type { Finding, ScanJob } from '../../types.js';
 import { aggregateRisk } from '../risk/scoring.js';
 import { complianceSummary, categorySummary } from '../compliance/mapping.js';
+import { buildIntelligence, type Intelligence } from './intelligence.js';
 
 const METHODOLOGY = [
   'OWASP Top 10 (2021) 및 OWASP ASVS 검증 항목 기반 비파괴(non-destructive) 점검',
@@ -42,6 +43,8 @@ export interface ScanReport {
   remediationRoadmap: { priority: string; window: string; items: { title: string; target: string; action: string }[] }[];
   technical: Finding[];
   delta?: ReportDelta;
+  /** AI Pentest Report 인텔리전스 (MITRE ATT&CK·예상 피해(FAIR)·Attack Path·재현) */
+  intelligence?: Intelligence;
 }
 
 export interface ReportDelta {
@@ -108,6 +111,7 @@ export function buildReport(job: ScanJob): ScanReport {
     remediationRoadmap: buildRoadmap(job.findings),
     technical: job.findings,
     delta: computeDelta(job),
+    intelligence: buildIntelligence(job.findings, asset?.businessCriticality ?? 'high'),
   };
 }
 
@@ -125,6 +129,12 @@ function buildRoadmap(findings: Finding[]): ScanReport['remediationRoadmap'] {
       title: f.title, target: f.target, action: f.remediation ?? '조치 검토',
     })),
   })).filter((t) => t.items.length);
+}
+
+function wonText(n: number): string {
+  if (n >= 100_000_000) return `약 ${(n / 100_000_000).toFixed(1)}억원`;
+  if (n >= 10_000) return `약 ${Math.round(n / 10_000).toLocaleString()}만원`;
+  return `${(n || 0).toLocaleString()}원`;
 }
 
 /** 마크다운 리포트 (PDF/DOCX 변환 소스). */
@@ -171,7 +181,33 @@ export function reportToMarkdown(r: ScanReport): string {
     }
   } else lines.push('- 조치 대상 없음');
 
-  lines.push(`\n## 6. 기술 상세 (Technical Findings)`);
+  if (r.intelligence) {
+    const it = r.intelligence;
+    lines.push(`\n## 6. 공격 시나리오 인텔리전스 (AI Pentest)`);
+    if (it.loss && it.loss.likely > 0) {
+      lines.push(`\n### 6.1 예상 피해금액 (FAIR 기반 추정 · 참고용)`);
+      lines.push(`- 추정 손실: **${wonText(it.loss.likely)}** (레인지 ${wonText(it.loss.min)} ~ ${wonText(it.loss.max)})`);
+      it.loss.breakdown.forEach((b) => lines.push(`- ${b}`));
+      lines.push(`- 산정 근거: ${it.loss.basis}`);
+    }
+    if (it.paths.length) {
+      lines.push(`\n### 6.2 공격 경로 (Attack Path · 킬체인 분석)`);
+      for (const p of it.paths) {
+        lines.push(`- **${p.name}** [${p.severity.toUpperCase()}]: ${p.stages.map((s) => s.phase.split('(')[0] + (s.technique ? `(${s.technique.split(' ')[0]})` : '')).join(' → ')}`);
+        lines.push(`  - ${p.narrative}`);
+      }
+    }
+    if (it.attack.length) {
+      lines.push(`\n### 6.3 MITRE ATT&CK 기법 매핑`);
+      it.attack.forEach((a) => lines.push(`- ${a.id} ${a.name} (${a.tactic})${a.count > 1 ? ` ×${a.count}` : ''}`));
+    }
+    if (it.repro.length) {
+      lines.push(`\n### 6.4 재현 절차 (비파괴)`);
+      it.repro.forEach((rp) => { lines.push(`\n**${rp.title}**`); rp.steps.forEach((st) => lines.push(`- ${st}`)); });
+    }
+  }
+
+  lines.push(`\n## 7. 기술 상세 (Technical Findings)`);
   r.technical.forEach((f, i) => {
     lines.push(`\n### ${i + 1}. [${(f.severity).toUpperCase()} · 위험 ${f.riskScore ?? 0}] ${f.title}`);
     lines.push(`- 대상: ${f.target}`);
@@ -240,6 +276,30 @@ export function reportToHtml(r: ScanReport): string {
   const compRows = Object.entries(r.compliance).map(([fw, v]) => `<tr><td><b>${esc(fw)}</b></td><td>${esc(v.controls.join(', '))}</td></tr>`).join('') || '<tr><td colspan="2">매핑 없음</td></tr>';
   const roadmapRows = r.remediationRoadmap.map((t) => `<tr><td><b>${esc(t.priority)}</b></td><td>${esc(t.window)}</td><td>${t.items.length}건</td><td>${esc(t.items.slice(0, 3).map((x) => x.title).join(' / '))}${t.items.length > 3 ? ' …' : ''}</td></tr>`).join('') || '<tr><td colspan="4">조치 대상 없음</td></tr>';
   const methodItems = r.methodology.map((m) => `<li>${esc(m)}</li>`).join('');
+
+  const it = r.intelligence;
+  const intelHtml = !it ? '' : `
+    <div class="page-break"></div>
+    <h2>6. 공격 시나리오 인텔리전스 (AI Pentest)</h2>
+    ${it.loss && it.loss.likely > 0 ? `
+    <div class="finding" style="border-left:3px solid #dc2626">
+      <div class="f-head"><span class="f-title">예상 피해금액 (FAIR 기반 추정 · 참고용)</span>
+        <span class="f-risk" style="color:#dc2626;font-weight:700">${esc(wonText(it.loss.likely))}</span></div>
+      <div class="f-row small">레인지 ${esc(wonText(it.loss.min))} ~ ${esc(wonText(it.loss.max))}${it.loss.regulatory > 0 ? ` · 규제 과징금 추정 ${esc(wonText(it.loss.regulatory))}` : ''}</div>
+      ${it.loss.breakdown.map((b) => `<div class="f-row small">· ${esc(b)}</div>`).join('')}
+      <div class="f-row small" style="color:#6b7484">${esc(it.loss.basis)}</div>
+    </div>` : ''}
+    ${it.paths.map((p) => `<div class="finding">
+      <div class="f-head"><span class="sev" style="background:${(SEV_META[p.severity] ?? SEV_META.info!)[2]};color:${(SEV_META[p.severity] ?? SEV_META.info!)[1]}">${(SEV_META[p.severity] ?? SEV_META.info!)[0]}</span>
+        <span class="f-title">${esc(p.name)}</span></div>
+      <div class="f-row"><span class="mono">${p.stages.map((s) => esc(s.phase.split('(')[0]) + (s.technique ? ` <span class="tag">${esc(s.technique)}</span>` : '')).join(' → ')}</span></div>
+      <div class="f-row small">${esc(p.narrative)}</div>
+    </div>`).join('')}
+    ${it.attack.length ? `<h3 style="font-size:13px;margin:12px 0 4px">MITRE ATT&CK 기법 매핑</h3>
+    <div class="tags">${it.attack.map((a) => `<span class="tag" title="${esc(a.tactic)}">${esc(a.id)} ${esc(a.name)}${a.count > 1 ? ` ×${a.count}` : ''}</span>`).join('')}</div>` : ''}
+    ${it.repro.length ? `<h3 style="font-size:13px;margin:12px 0 4px">재현 절차 (비파괴)</h3>
+    ${it.repro.map((rp) => `<div class="finding"><div class="f-head"><span class="f-title">${esc(rp.title)}</span></div>
+      <ol style="margin:4px 0;padding-left:20px;font-size:11px">${rp.steps.map((st) => `<li>${esc(st)}</li>`).join('')}</ol></div>`).join('')}` : ''}`;
 
   return `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"/>
 <title>SENTINEL-ASM 보안 점검 보고서 — ${esc(r.asset.value)}</title>
@@ -325,9 +385,10 @@ export function reportToHtml(r: ScanReport): string {
 
     <h2>5. 조치 로드맵</h2>
     <table><thead><tr><th>우선순위</th><th>기한</th><th>건수</th><th>대표 항목</th></tr></thead><tbody>${roadmapRows}</tbody></table>
+    ${intelHtml}
 
     <div class="page-break"></div>
-    <h2>6. 기술 상세 (위험 우선순위 순)</h2>
+    <h2>7. 기술 상세 (위험 우선순위 순)</h2>
     ${findingsHtml || '<p>발견된 항목이 없습니다.</p>'}
 
     <div class="footer">SENTINEL-ASM 자동 생성 보고서 · 권한이 검증된 자산에 한해 비파괴 점검으로 작성 · ${esc(dateStr)}</div>
