@@ -464,6 +464,13 @@ function IntelPanel({ jobId }) {
   return html`<div class="panel">
     <h3>🎯 공격 시나리오 인텔리전스 <span class="muted" style=${{ fontSize: 12, fontWeight: 400 }}>(MITRE ATT&CK · 예상 피해 · 공격 경로 · 재현 — 분석 전용, 비파괴)</span></h3>
 
+    ${d.pii && d.pii.endpoints > 0 && html`<div class="card" style=${{ marginBottom: 12, borderLeft: '3px solid #b91c1c' }}>
+      <div class="k">유출 영향 정량화 <span class="muted">(개인정보 노출 규모)</span></div>
+      <div class="v" style=${{ color: '#b91c1c', fontSize: 20 }}>${d.pii.surfaceOnly ? '스키마 PII 필드 노출' : d.pii.enumerable ? '전체 사용자 열거 가능' : `최대 ${(d.pii.records || 0).toLocaleString()}건`}</div>
+      <div class="muted" style=${{ fontSize: 12 }}>노출 PII 유형: ${(d.pii.categories || []).join(' · ') || '민감필드'}${d.pii.sensitive ? ' · ⚠ 고위험 민감정보(주민·카드 등) 포함' : ''}</div>
+      <div class="muted" style=${{ fontSize: 11, marginTop: 2 }}>영향 엔드포인트 ${d.pii.endpoints}개 · ${d.pii.surfaceOnly ? '실제 레코드 미수집(스키마 표면 확인)' : `추정 피해 인원 ${(d.pii.affectedEstimate || 0).toLocaleString()}명${d.pii.enumerable ? '+ (전체 사용자 확대 가능)' : ''}`}</div>
+    </div>`}
+
     ${loss.likely > 0 && html`<div class="card" style=${{ marginBottom: 12, borderLeft: '3px solid #e0533d' }}>
       <div class="k">예상 피해금액 <span class="muted">(FAIR 기반 추정 · 참고용)</span></div>
       <div class="v" style=${{ color: '#e0533d' }}>${fmtWon(loss.likely)}</div>

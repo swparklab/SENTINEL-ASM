@@ -184,6 +184,12 @@ export function reportToMarkdown(r: ScanReport): string {
   if (r.intelligence) {
     const it = r.intelligence;
     lines.push(`\n## 6. 공격 시나리오 인텔리전스 (AI Pentest)`);
+    if (it.pii && it.pii.endpoints > 0) {
+      lines.push(`\n### 6.0 유출 영향 정량화 (개인정보 노출 규모)`);
+      lines.push(`- 노출 규모: **${it.pii.surfaceOnly ? '스키마 PII 필드 노출(실제 레코드 미수집)' : it.pii.enumerable ? '전체 사용자 열거 가능' : `최대 ${it.pii.records.toLocaleString()}건`}** (영향 엔드포인트 ${it.pii.endpoints}개)`);
+      lines.push(`- 노출 PII 유형: ${it.pii.categories.join(' · ') || '민감필드'}${it.pii.sensitive ? ' · ⚠ 고위험 민감정보(주민·카드 등) 포함' : ''}`);
+      if (!it.pii.surfaceOnly) lines.push(`- 추정 피해 인원: ${it.pii.affectedEstimate.toLocaleString()}명${it.pii.enumerable ? '+ (순차 열거 시 전체 사용자)' : ''}`);
+    }
     if (it.loss && it.loss.likely > 0) {
       lines.push(`\n### 6.1 예상 피해금액 (FAIR 기반 추정 · 참고용)`);
       lines.push(`- 추정 손실: **${wonText(it.loss.likely)}** (레인지 ${wonText(it.loss.min)} ~ ${wonText(it.loss.max)})`);
@@ -281,6 +287,13 @@ export function reportToHtml(r: ScanReport): string {
   const intelHtml = !it ? '' : `
     <div class="page-break"></div>
     <h2>6. 공격 시나리오 인텔리전스 (AI Pentest)</h2>
+    ${it.pii && it.pii.endpoints > 0 ? `
+    <div class="finding" style="border-left:3px solid #b91c1c">
+      <div class="f-head"><span class="f-title">유출 영향 정량화 (개인정보 노출 규모)</span>
+        <span class="f-risk" style="color:#b91c1c;font-weight:700">${it.pii.surfaceOnly ? '스키마 PII 필드 노출' : it.pii.enumerable ? '전체 사용자 열거 가능' : `최대 ${it.pii.records.toLocaleString()}건`}</span></div>
+      <div class="f-row small">노출 PII 유형: ${esc(it.pii.categories.join(' · ') || '민감필드')}${it.pii.sensitive ? ' · ⚠ 고위험 민감정보(주민·카드 등) 포함' : ''}</div>
+      <div class="f-row small">영향 엔드포인트 ${it.pii.endpoints}개 · ${it.pii.surfaceOnly ? '실제 레코드 미수집(스키마 표면 확인)' : `추정 피해 인원 ${it.pii.affectedEstimate.toLocaleString()}명${it.pii.enumerable ? '+ (전체 사용자 확대 가능)' : ''}`}</div>
+    </div>` : ''}
     ${it.loss && it.loss.likely > 0 ? `
     <div class="finding" style="border-left:3px solid #dc2626">
       <div class="f-head"><span class="f-title">예상 피해금액 (FAIR 기반 추정 · 참고용)</span>

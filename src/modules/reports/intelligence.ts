@@ -11,7 +11,33 @@ import type { Finding } from '../../types.js';
 export interface AttackTechnique { id: string; name: string; tactic: string }
 export interface AttackPath { name: string; severity: Finding['severity']; stages: { phase: string; finding: string; technique?: string }[]; narrative: string }
 export interface LossEstimate { currency: 'KRW'; min: number; likely: number; max: number; regulatory: number; breakdown: string[]; basis: string }
-export interface Intelligence { attack: { id: string; name: string; tactic: string; count: number }[]; paths: AttackPath[]; loss: LossEstimate; repro: { title: string; steps: string[] }[] }
+/** 유출 영향 정량화(115): 노출/열람 가능한 레코드 수, PII 유형, 추정 피해 인원, 순차 열거 가능 여부, 표면만 여부. */
+export interface PiiImpact { records: number; enumerable: boolean; surfaceOnly: boolean; categories: string[]; sensitive: boolean; affectedEstimate: number; endpoints: number; summary: string }
+export interface Intelligence { attack: { id: string; name: string; tactic: string; count: number }[]; paths: AttackPath[]; loss: LossEstimate; pii: PiiImpact; repro: { title: string; steps: string[] }[] }
+
+const SENSITIVE_CATS = /주민|주민등록번호|ssn|social_?security|\brrn\b|resident|신용카드|card|여권|passport|계좌|account|비밀번호|password|passwd|secret|token|급여|연봉|salary|생년월일|birth_?date|\bdob\b|건강|medical|health|진료/i;
+
+/** 발견들의 dataImpact 를 합성해 유출 영향을 정량화한다. (제목 휴리스틱이 아닌 명시 플래그 기반) */
+export function quantifyPii(findings: Finding[]): PiiImpact {
+  const withData = findings.filter((f) => f.dataImpact && (f.dataImpact.records > 0 || f.dataImpact.categories.length));
+  const cats = new Set<string>();
+  let maxRecords = 0; let enumerable = false;
+  for (const f of withData) {
+    const di = f.dataImpact!;
+    for (const c of di.categories) cats.add(c);
+    if (di.records > maxRecords) maxRecords = di.records;
+    if (di.enumerable) enumerable = true;
+  }
+  const categories = [...cats];
+  const sensitive = categories.some((c) => SENSITIVE_CATS.test(c));
+  const surfaceOnly = withData.length > 0 && !withData.some((f) => f.dataImpact!.records > 0);   // 어디서도 실제 레코드 미수집(스키마/표면만)
+  const affectedEstimate = maxRecords;
+  const scaleNote = enumerable ? '(순차 열거 시 전체 사용자로 확장 가능)' : '';
+  const summary = !withData.length ? '개인정보 직접 노출 미검출'
+    : surfaceOnly ? `개인정보 필드 노출 표면 확인${scaleNote} · PII 유형 ${categories.slice(0, 8).join('·') || '민감필드'}${sensitive ? ' · 고위험 민감정보 포함' : ''} (실제 레코드 미수집)`
+    : `노출 레코드 최대 ${maxRecords.toLocaleString()}건${scaleNote} · PII 유형 ${categories.slice(0, 8).join('·') || '민감필드'}${sensitive ? ' · 고위험 민감정보 포함' : ''}`;
+  return { records: maxRecords, enumerable, surfaceOnly, categories, sensitive, affectedEstimate, endpoints: withData.length, summary };
+}
 
 // ── MITRE ATT&CK 매핑(CWE 우선, 제목 키워드 보조) ──
 const ATT: { test: (f: Finding) => boolean; techs: AttackTechnique[] }[] = [
@@ -53,13 +79,25 @@ export function estimateLoss(findings: Finding[], businessCriticality = 'high'):
   }
   let incident = [...byCat.values()].reduce((s, v) => s + v, 0) * mult;
 
-  // 규제 과징금: 개인정보 노출 발견이 있으면 개인정보보호법/GDPR 과징금 추정 가산.
+  // 규제 과징금 + 정보주체 배상: 정량화된 노출 레코드 수로 데이터 기반 산정(115).
+  const pii = quantifyPii(findings);
   const piiFindings = findings.filter((f) => /개인정보|PII|주민|회원 목록|이메일|휴대전화|CWE-359/i.test(f.title + (f.cwe || '')));
   let regulatory = 0;
-  if (piiFindings.length) {
-    const sev = piiFindings.some((f) => f.severity === 'critical') ? 'critical' : 'high';
-    regulatory = sev === 'critical' ? 1_000_000_000 : 300_000_000; // 개인정보보호법 과징금(매출 3%)·배상 추정 레인지
-    breakdown.push(`개인정보 노출 ${piiFindings.length}건 → 규제 과징금·정보주체 배상 시나리오 가정 ${won(regulatory)} (개인정보보호법 §64-2 / GDPR Art.83 — 실 과징금은 매출·정보주체 수·관할에 따라 산정되며 본 수치는 가정 레인지)`);
+  if (pii.endpoints > 0 || piiFindings.length) {
+    const sevCrit = pii.sensitive || piiFindings.some((f) => f.severity === 'critical');
+    const perRecord = pii.sensitive ? 300_000 : 100_000;   // 1인당 배상 단가(국내 판례 ~10~30만원/인, 민감정보 가중)
+    // 정보주체 배상: 실제 수집된 레코드만 기준. 스키마/표면만 확인된 경우(surfaceOnly)는 배상 0(잠재 표면) — 과징금만 가산.
+    let affected = pii.records;
+    if (affected === 0 && !pii.surfaceOnly && piiFindings.length) affected = 100;   // 실제 PII 값은 검출됐으나 카운트 미상(소규모 가정)
+    const civil = pii.surfaceOnly ? 0 : Math.min(affected * perRecord, 50_000_000_000);
+    const fine = sevCrit ? 1_000_000_000 : 300_000_000;    // 과징금(매출 3% 가정 레인지)
+    regulatory = civil + fine;
+    breakdown.push(`개인정보 영향 정량화: ${pii.summary}`);
+    if (pii.surfaceOnly) {
+      breakdown.push(`스키마/표면 노출(실제 레코드 미확인) → 정보주체 배상은 미산정, 규제 과징금 가정 ${won(fine)}${pii.enumerable ? ' (비인가 쿼리로 전체 사용자 확대 가능)' : ''} (개인정보보호법 §64-2 / GDPR Art.83 — 실 산정은 매출·정보주체 수·관할에 따라 달라짐)`);
+    } else {
+      breakdown.push(`정보주체 배상 추정 ≈ ${won(civil)} (피해 ${affected.toLocaleString()}인 × 1인당 ${won(perRecord)}${pii.enumerable ? ', 순차 열거 시 전체 사용자로 확대' : ''}) + 규제 과징금 가정 ${won(fine)} (개인정보보호법 §64-2 / GDPR Art.83 — 실 산정은 매출·정보주체 수·관할에 따라 달라짐)`);
+    }
   }
   const critN = findings.filter((f) => f.severity === 'critical').length;
   const highN = findings.filter((f) => f.severity === 'high').length;
@@ -67,7 +105,7 @@ export function estimateLoss(findings: Finding[], businessCriticality = 'high'):
 
   const likely = incident + regulatory;
   return { currency: 'KRW', min: Math.round(likely * 0.4), likely: Math.round(likely), max: Math.round(likely * 2.2), regulatory, breakdown,
-    basis: 'FAIR 기반 휴리스틱 추정(단일손실×빈도/신뢰도 가중 + 규제 과징금). 실제 손실은 데이터 규모·계약·관할에 따라 달라지며 참고용입니다.' };
+    basis: 'FAIR 기반 추정(단일손실×빈도/신뢰도 + 노출 레코드 기반 배상 + 규제 과징금). 실제 손실은 데이터 규모·계약·관할에 따라 달라지며 참고용입니다.' };
 }
 
 // ── Attack Path 합성(킬체인 단계로 묶기) ──
@@ -119,6 +157,7 @@ export function buildIntelligence(findings: Finding[], businessCriticality = 'hi
     attack: [...attackMap.values()].sort((a, b) => b.count - a.count),
     paths: attackPaths(real),
     loss: estimateLoss(real, businessCriticality),
+    pii: quantifyPii(real),
     repro: top.map((f) => ({ title: f.title, steps: reproSteps(f) })),
   };
 }

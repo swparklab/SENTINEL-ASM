@@ -122,6 +122,9 @@ export interface Finding {
   confidence?: 'confirmed' | 'firm' | 'tentative';
   evidence?: string;
   remediation?: string;
+  /** 노출 데이터 영향 정량화 (설계 §5.3): 이 발견으로 접근 가능한 레코드 수 + PII 유형 (피해 규모·FAIR 산정 근거).
+   *  enumerable: 순차 식별자/열거로 전체 사용자까지 확장 가능. surfaceOnly: 스키마/표면만 확인(실제 PII 레코드 미수집). */
+  dataImpact?: { records: number; categories: string[]; enumerable?: boolean; surfaceOnly?: boolean };
 }
 
 export interface ComplianceMapping {
