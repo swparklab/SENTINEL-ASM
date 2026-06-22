@@ -150,7 +150,7 @@ export async function scanApiExposure(p: ApiExposureInput): Promise<Finding[]> {
       const authNotEnforced = !!diff && diff.status === 200 && !!diff.body && analyzePii(diff.body, parseJson(diff.body)).total >= a.total;
       const conf: Conf = (a.rrn || a.card) ? 'confirmed' : 'firm';
       const detail = piiDetail(a);
-      findings.push(make('critical',
+      findings.push(impact(make('critical',
         `인증 없이 개인정보(PII) 대량 노출 — 비인가 API 응답: ${path}`, host + path,
         `데이터 API(${path})가 인증·인가 없이 개인정보를 그대로 반환합니다(레코드 ${records}건, ${detail}). ` +
         `주소창/스크립트로 호출만 하면 비공개 개인정보가 외부로 유출되는 구조입니다(API 요청 시 개인정보 무분별 제공). ` +
@@ -158,39 +158,39 @@ export async function scanApiExposure(p: ApiExposureInput): Promise<Finding[]> {
         `status=200, content-type=${ct}, records≈${records}, ${detail}; sample=${a.sample}` +
         (authNotEnforced ? ' | 익명+무효토큰 동일 PII 반환(인증 미강제)' : ''),
         '데이터 API 전 구간에 인증·객체/필드 수준 인가를 서버측에서 강제하고, 응답은 요청자가 권한을 가진 필드만(최소수집·최소노출) 직렬화하십시오. 대량 조회는 레이트리밋·페이지네이션·감사로깅으로 통제하고, 노출된 개인정보는 즉시 차단·통지·재발급 절차를 가동하십시오.',
-        'A01:2021', 'CWE-359', conf, REF_PII));
+        'A01:2021', 'CWE-359', conf, REF_PII), records, piiCategories(a)));
     } else if (multi) {
       reportedEndpoints.add(path);
-      findings.push(make('high',
+      findings.push(impact(make('high',
         `비인가 API 개인정보 노출 가능성(다수): ${path}`, host + path,
         `데이터 API(${path})가 인증 없이 개인정보로 보이는 값 다수(${piiDetail(a)})를 단일 응답으로 반환합니다. 레코드 배열이 아니어서 대량 유출로 단정하긴 어려우나 공개 의도인지 인가 누락인지 확인이 필요합니다.`,
         `status=200, content-type=${ct}, records≈${records}, ${piiDetail(a)}; sample=${a.sample}`,
         '엔드포인트가 비공개 데이터를 다룬다면 인증·인가를 강제하고 개인정보 필드를 응답에서 제거/마스킹하십시오.',
-        'A01:2021', 'CWE-359', 'tentative', REF_PII));
+        'A01:2021', 'CWE-359', 'tentative', REF_PII), records, piiCategories(a)));
     } else if (single && records >= 1) {
       reportedEndpoints.add(path);
-      findings.push(make('medium',
+      findings.push(impact(make('medium',
         `비인가 API 개인정보 값 노출 가능성: ${path}`, host + path,
         `데이터 API(${path})가 인증 없이 개인정보로 보이는 값 1건(${piiDetail(a)})을 반환합니다. 공개 연락처(support 등)일 수 있어, 비공개 데이터인지 인가 누락인지 확인이 필요합니다.`,
         `status=200, content-type=${ct}, records≈${records}, ${piiDetail(a)}; sample=${a.sample}`,
         '엔드포인트가 비공개 데이터를 다룬다면 인증·인가를 강제하고 개인정보 필드를 응답에서 제거/마스킹하십시오.',
-        'A01:2021', 'CWE-359', 'tentative', REF_PII));
+        'A01:2021', 'CWE-359', 'tentative', REF_PII), records, piiCategories(a)));
     } else if (a.sensitiveKeys.size >= 2 && records >= 3) {
       reportedEndpoints.add(path);
-      findings.push(make('medium',
+      findings.push(impact(make('medium',
         `인증 없이 민감 필드 데이터 노출(과다 노출 표면): ${path}`, host + path,
         `데이터 API(${path})가 인증 없이 민감해 보이는 필드(${[...a.sensitiveKeys].slice(0, 6).join(', ')})를 ${records}건 반환합니다. PII 패턴은 미검증이나 과다 노출(Excessive Data Exposure) 표면입니다.`,
         `status=200, content-type=${ct}, records≈${records}, sensitive-keys=${[...a.sensitiveKeys].slice(0, 8).join(', ')}`,
         '응답 스키마를 최소 필드로 제한(허용목록 직렬화)하고, 민감 데이터 조회에 인증·인가를 강제하십시오.',
-        'A01:2021', 'CWE-213', 'tentative', REF_API));
+        'A01:2021', 'CWE-213', 'tentative', REF_API), records, [...a.sensitiveKeys].slice(0, 8)));
     } else if (records >= 25) {
       reportedEndpoints.add(path);
-      findings.push(make('low',
+      findings.push(impact(make('low',
         `인증 없이 대량 데이터 반환(대량 수집 표면): ${path}`, host + path,
         `데이터 API(${path})가 인증 없이 ${records}건의 레코드를 한 번에 반환합니다. 개인정보가 아니더라도 대량 자동수집(스크레이핑)·열거에 악용될 표면입니다.`,
         `status=200, content-type=${ct}, records≈${records}`,
         '대량 조회에 인증·페이지네이션·레이트리밋을 적용하고, 불필요한 전체 덤프 엔드포인트를 제거하십시오.',
-        'A01:2021', 'CWE-213', 'tentative', REF_API));
+        'A01:2021', 'CWE-213', 'tentative', REF_API), records, ['대량레코드']));
     }
   }
   if (protectedCount > 0) ctx.log(`apiexposure: 데이터 API ${protectedCount}건 인증 보호(401/403) 확인`);
@@ -218,12 +218,13 @@ export async function scanApiExposure(p: ApiExposureInput): Promise<Finding[]> {
       // critical 은 양쪽 객체 모두 PII 를 보유할 때만(서로 다른 소유자 귀속이 드러남). 한쪽만 PII 면 아래 tentative 단서로.
       const pii = a1.total > 0 && a2.total > 0;
       if (pii) {
-        findings.push(make('critical',
+        const big = a1.total >= a2.total ? a1 : a2;
+        findings.push(impact(make('critical',
           `객체 수준 인가 누락(BOLA)로 타인 개인정보 열람: ${t.label}`, host + t.label,
           `식별자(${t.label})를 1→2 로 바꾸면 인증 없이 서로 다른 사용자의 개인정보가 같은 형식으로 반환됩니다. 주소창의 번호만 바꿔 임의 사용자의 개인정보를 열람할 수 있는 구조입니다.`,
-          `${t.url(1)} / ${t.url(2)} → 상이한 200 JSON, PII 검출(${piiDetail(a1.total >= a2.total ? a1 : a2)})`,
+          `${t.url(1)} / ${t.url(2)} → 상이한 200 JSON, PII 검출(${piiDetail(big)})`,
           '객체 접근마다 요청자가 소유자/권한자인지 서버측에서 검증하고, 추측 가능한 순번 식별자 대신 비순차 식별자(UUID)/간접참조를 사용하십시오. 개인정보 응답은 인가된 필드만 직렬화하십시오.',
-          'A01:2021', 'CWE-639', 'firm', REF_API));
+          'A01:2021', 'CWE-639', 'firm', REF_API), 2, piiCategories(big), { enumerable: true }));   // 표본 2건 실제 열람 + 순차 열거로 전체 사용자까지 확장 가능
       } else if (sameTemplate(r1.body, r2.body)) {
         findings.push(make('medium',
           `객체 수준 인가 누락 단서(BOLA): ${t.label}`, host + t.label,
@@ -293,6 +294,29 @@ function piiDetail(a: PiiAnalysis): string {
   return bits.join(', ') || '데이터';
 }
 
+/** 발견에 노출 데이터 영향(레코드 수·PII 유형 + 열거/표면 플래그)을 부착해 반환. */
+function impact(f: Finding, records: number, categories: string[], flags?: { enumerable?: boolean; surfaceOnly?: boolean }): Finding {
+  f.dataImpact = { records, categories, ...flags };
+  return f;
+}
+
+/** PII 유형 라벨 집합 (피해 영향 정량화·FAIR 산정용). 검증된 유형 우선, 중복 필드명은 제외. */
+export function piiCategories(a: PiiAnalysis): string[] {
+  const c: string[] = [];
+  if (a.emails.size) c.push('이메일');
+  if (a.phones.size) c.push('휴대전화');
+  if (a.rrn) c.push('주민등록번호');
+  if (a.card) c.push('신용카드');
+  for (const k of a.sensitiveKeys) {
+    if (c.length >= 12) break;
+    if (a.emails.size && /e_?mail|이메일|메일/i.test(k)) continue;       // 위 검증 유형과 중복되는 필드명 제외
+    if (a.phones.size && /phone|mobile|tel|휴대|전화|연락처/i.test(k)) continue;
+    if (a.rrn && /rrn|주민/i.test(k)) continue;
+    c.push(k);
+  }
+  return c;
+}
+
 function validRrn(s13: string): boolean {
   if (!/^\d{13}$/.test(s13)) return false;
   const d = s13.split('').map(Number);
@@ -310,7 +334,9 @@ function validCard(raw: string): boolean {
 }
 function maskEmail(e: string): string {
   const at = e.indexOf('@'); if (at < 1) return '***';
-  return e.slice(0, Math.min(2, at)) + '***' + e.slice(at);
+  const dom = e.slice(at + 1);
+  const tld = dom.includes('.') ? dom.slice(dom.lastIndexOf('.')) : '';   // TLD 만 남기고 도메인 라벨은 마스킹(조직 식별 단편 비노출)
+  return (e[0] || '*') + '***@***' + tld;
 }
 function maskPhone(d: string): string { return d.length >= 7 ? d.slice(0, 3) + '****' + d.slice(-2) : '01******'; }
 
@@ -329,20 +355,35 @@ export function parseJson(body: string): unknown {
   if (t[0] !== '{' && t[0] !== '[') return undefined;
   try { return JSON.parse(t); } catch { return undefined; }
 }
-/** 최상위 또는 흔한 래퍼(data/items/results/content…) 안의 배열 길이로 레코드 수를 추정. */
+/** 페이지네이션 모집단 힌트(totalElements/totalCount/total/count…) — 페이지 길이보다 크면 실제 모집단으로 채택. */
+function populationHint(o: Record<string, unknown>): number {
+  let max = 0;
+  for (const k of ['totalElements', 'totalCount', 'total_count', 'total', 'count', 'totalItems', 'total_results', 'totalResults', 'recordsTotal', 'numFound']) {
+    const v = o[k];
+    if (typeof v === 'number' && Number.isFinite(v) && v > max) max = v;
+  }
+  const pi = o['pageInfo'] ?? o['page'] ?? o['meta'];
+  if (pi && typeof pi === 'object') max = Math.max(max, populationHint(pi as Record<string, unknown>));
+  return max;
+}
+/** 최상위 또는 흔한 래퍼(data/items/results/content…) 안의 배열 길이로 레코드 수를 추정.
+ *  페이지네이션 응답이면 모집단 힌트(totalElements 등)가 페이지 길이보다 클 때 그 값을 채택(과소 산정 방지). */
 export function recordCount(parsed: unknown): number {
   if (Array.isArray(parsed)) return parsed.length;
   if (parsed && typeof parsed === 'object') {
     const o = parsed as Record<string, unknown>;
+    const hint = populationHint(o);
     for (const k of ['data', 'items', 'results', 'list', 'content', 'rows', 'records', 'users', 'members',
       'applicants', 'applications', 'submissions', 'entries', 'payload', 'docs', 'edges']) {
-      if (Array.isArray(o[k])) return (o[k] as unknown[]).length;
+      if (Array.isArray(o[k])) return Math.max((o[k] as unknown[]).length, hint);
     }
     const d = o['data'];
     if (d && typeof d === 'object') {
       const dd = d as Record<string, unknown>;
-      for (const k of ['content', 'items', 'list', 'results', 'rows']) if (Array.isArray(dd[k])) return (dd[k] as unknown[]).length;
+      const dHint = Math.max(hint, populationHint(dd));
+      for (const k of ['content', 'items', 'list', 'results', 'rows']) if (Array.isArray(dd[k])) return Math.max((dd[k] as unknown[]).length, dHint);
     }
+    if (hint > 0) return hint;
   }
   return 1;
 }

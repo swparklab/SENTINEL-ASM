@@ -394,6 +394,26 @@ export const dastScanner: Scanner = {
               '운영에서 GraphQL 인트로스펙션을 비활성화하고, 쿼리 깊이/복잡도 제한·인증·레이트리밋을 적용하십시오.'),
               owasp: 'A05:2021', cwe: 'CWE-200', confidence: 'firm',
               references: ['https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html'] });
+
+            // [47] 스키마에 PII 타입 필드가 인증 없이 노출되는지(필드명 분석, 비파괴·읽기 전용 — 실제 PII 쿼리 미수행)
+            const fr = await ctx.guard.httpGet(base + gp + '?query=' + encodeURIComponent('{__schema{types{name fields{name}}}}'));
+            // __schema/fields 구조가 실제로 반환된 경우에만 필드명 분석(일반 JSON 값 harvest 방지).
+            if (fr && fr.status === 200 && fr.body && /"__schema"|"fields"\s*:/.test(fr.body)) {
+              const PII_FIELD = /\b(email|e_?mail|phone|mobile|tel|ssn|social_?security|resident(_?registration)?|rrn|passport|credit_?card|card_?number|cvv|password|passwd|pwd|secret|token|salary|birth_?date|dob|address|account_?number)\b/i;
+              // 한글은 \b 가 무력 → 합성어 전체 토큰만(카드뉴스/주소록/카드사 등 부분문자열 오탐 억제).
+              const KO_PII = /(이메일|전자우편|휴대폰번호|휴대전화번호|주민등록번호|여권번호|신용카드|카드번호|계좌번호|생년월일|연봉|급여명세|비밀번호)/;
+              const fields = [...fr.body.matchAll(/"name"\s*:\s*"([A-Za-z0-9_가-힣]{1,48})"/g)].map((m) => m[1]!);
+              const hits = [...new Set(fields.filter((n) => PII_FIELD.test(n) || KO_PII.test(n)))].slice(0, 10);
+              if (hits.length) {
+                const f0 = mk('dast', 'high', `GraphQL 스키마에 인증 없이 개인정보(PII) 필드 노출: ${gp}`, ctx.asset.value + gp,
+                  `인트로스펙션이 인증 없이 PII 타입 필드(${hits.join(', ')})를 노출합니다. 동일 경로로 비인가 GraphQL 쿼리를 보내면 개인정보를 수집할 수 있는 구조입니다(스키마 분석만 수행, 실제 PII 쿼리는 미실행).`,
+                  `${gp} __schema fields → PII 필드 ${hits.length}종: ${hits.join(', ')}`,
+                  'GraphQL 인트로스펙션을 비활성화하고, PII 필드 조회에 필드 수준 인가·인증을 강제하며, 응답을 최소 필드로 제한하십시오.');
+                f0.dataImpact = { records: 0, categories: hits, enumerable: true, surfaceOnly: true };   // 스키마 표면만 확인(실제 PII 미수집), 비인가 쿼리로 전체 열거 가능
+                findings.push({ ...f0, owasp: 'A01:2021', cwe: 'CWE-359', confidence: 'firm',
+                  references: ['https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html'] });
+              }
+            }
           } else {
             findings.push({ ...mk('dast', 'low', `GraphQL 엔드포인트 노출: ${gp}`, ctx.asset.value + gp,
               'GraphQL 엔드포인트가 응답합니다(인트로스펙션은 비활성/차단으로 보임). 쿼리 깊이/복잡도·인증 점검이 필요합니다.',
@@ -680,7 +700,8 @@ function scanPii(b: string): { type: string; masked: string }[] {
     const w = [2, 3, 4, 5, 6, 7, 8, 9, 2, 3, 4, 5];
     const sum = w.reduce((s, x, i) => s + x * digits[i]!, 0);
     const chk = (11 - (sum % 11)) % 10;
-    if (chk === digits[12]) { out.push({ type: '주민등록번호', masked: m[1]! + '-*******' }); break; }
+    // 생년월일(앞 6자리)도 PII → 출생연도 2자리만 남기고 월/일·뒷자리 전체 마스킹.
+    if (chk === digits[12]) { out.push({ type: '주민등록번호', masked: m[1]!.slice(0, 2) + '****-*******' }); break; }
   }
   // 신용카드 (Luhn)
   for (const m of b.matchAll(/\b(?:\d[ -]?){13,19}\b/g)) {
