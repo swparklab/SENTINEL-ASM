@@ -63,4 +63,15 @@ export const config = {
     enableDemoIndicators: (process.env.SENTINEL_CTI_DEMO ?? 'true') !== 'false',
     timeoutMs: Number(process.env.SENTINEL_CTI_TIMEOUT_MS ?? 8000),
   },
+
+  /**
+   * 대역외(OOB) 능동 확정 (설계 §4.5 active) — Burp Collaborator 방식의 콜백 기반 blind 취약점 확정.
+   * 페이로드에 콜라보레이터 URL 을 심어, 대상이 대역외로 콜백하면 blind SSRF 등을 확정한다(비파괴 — 콜백 신호만).
+   * collaboratorBase 가 비어 있으면 OOB 확정은 비활성(콜백 수신 불가). 운영에서는 대상이 도달 가능한 공개 도메인/IP 로 설정.
+   * waitMs: 페이로드 발신 후 콜백 수신을 기다리는 시간. aggressive+active(4-eyes) 게이트에서만 동작.
+   */
+  oob: {
+    collaboratorBase: (process.env.SENTINEL_OOB_BASE ?? '').replace(/\/$/, ''),
+    waitMs: Number(process.env.SENTINEL_OOB_WAIT_MS ?? 3500),
+  },
 } as const;

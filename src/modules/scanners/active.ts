@@ -77,11 +77,20 @@ export async function runActiveConfirmation(
       const trueLikeOrig = similar(orig.body, rt.body);
       const falseDiffers = !similar(rt.body, rf.body) && !isSoft404(rf);
       if (trueLikeOrig && falseDiffers) {
+        // Proof-of-Impact: 확정 주입점에서 DB 메타데이터(information_schema) 가독 여부를 boolean 으로만 입증한다.
+        // (참=레코드 존재 / 거짓=레코드 없음 분기만 관측 — 테이블/데이터 덤프·추출은 수행하지 않음.)
+        let poi = '';
+        const piT = await get(t.url(`${enc(t.orig)}%27%20AND%20(SELECT%20COUNT(*)%20FROM%20information_schema.tables)%3E0--%20-`));
+        const piF = await get(t.url(`${enc(t.orig)}%27%20AND%20(SELECT%20COUNT(*)%20FROM%20information_schema.tables)%3C0--%20-`));
+        if (ok(piT) && piF && similar(orig.body, piT.body) && !similar(piT.body, piF.body) && !isSoft404(piF)) {
+          poi = ' | Proof-of-Impact: DB 메타데이터(information_schema) 읽기 접근 입증(boolean 추론만, 덤프 없음)';
+        }
         findings.push(mkActive('high', `[활성 확정] SQL 인젝션 확정 — Boolean 차분(${v.kind}): ${t.param}`, host + t.path,
-          `파라미터 '${t.param}' 에서 \`AND 1=1\`(참)은 원본과 동일한 응답을, \`AND 1=2\`(거짓)은 다른 응답을 반환합니다. 입력이 SQL 질의에 그대로 합쳐져 참/거짓이 결과를 바꾸는 SQL 인젝션이 확정되었습니다(데이터 추출·변경 없이 차분만 관측).`,
-          `${t.param}: AND 1=1 ≈ 원본 / AND 1=2 ≠ (Boolean 분기 확인, ${v.kind} 컨텍스트)`,
+          `파라미터 '${t.param}' 에서 \`AND 1=1\`(참)은 원본과 동일한 응답을, \`AND 1=2\`(거짓)은 다른 응답을 반환합니다. 입력이 SQL 질의에 그대로 합쳐져 참/거짓이 결과를 바꾸는 SQL 인젝션이 확정되었습니다(데이터 추출·변경 없이 차분만 관측).` +
+          (poi ? ' DB 메타데이터(스키마) 읽기 접근도 입증되었습니다 — 데이터 덤프·추출은 수행하지 않았습니다.' : ''),
+          `${t.param}: AND 1=1 ≈ 원본 / AND 1=2 ≠ (Boolean 분기 확인, ${v.kind} 컨텍스트)${poi}`,
           '모든 DB 질의를 파라미터화(Prepared Statement)하고 입력을 화이트리스트 검증하십시오. ORM/바인딩을 사용하고 동적 문자열 결합을 제거하십시오.',
-          'A03:2021', 'CWE-89', 'firm', REF_SQLI));
+          'A03:2021', 'CWE-89', poi ? 'confirmed' : 'firm', REF_SQLI));
         confirmed = true; break;
       }
     }
