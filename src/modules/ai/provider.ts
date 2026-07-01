@@ -1,23 +1,26 @@
 /**
  * LLM 제공자 추상화 (설계 §5.3).
  * Anthropic Messages API / OpenAI 호환 Chat Completions 를 단일 인터페이스로 감싼다.
+ * provider='local' 은 사내/로컬 GPU 의 OpenAI 호환 엔드포인트(Ollama·vLLM·LM Studio 등)를 가리키며,
+ * 벤더 키 없이 동일 인터페이스로 붙는다(탈옥 불필요 — 오케스트레이터는 계획·분석만 하므로 검열해제 모델이 필요 없다).
  *
  * 안전 원칙:
- *  - 이 호출은 점검 대상이 아니라 LLM 벤더로 나가므로 EgressGuard(대상 allowlist)를 거치지 않는다(인프라 호출).
+ *  - 이 호출은 점검 대상이 아니라 LLM 엔드포인트(벤더 또는 로컬)로 나가므로 EgressGuard(대상 allowlist)를 거치지 않는다.
  *    대신 호출자(fingerprint/planner)가 PII·시크릿을 마스킹·제거한 데이터만 전달해야 한다.
  *  - 키 미설정·네트워크 오류·파싱 실패는 절대 throw 하지 않고 null 을 돌려준다(점검 무중단, graceful degradation).
- *  - 모델은 "계획·분석"만 생성한다. 실제 HTTP 발신은 기존 비파괴 엔진이 GET/HEAD/OPTIONS 로만 수행한다.
+ *  - 모델은 "계획·분석"만 생성한다(로컬이든 벤더든 동일). 실제 HTTP 발신은 기존 엔진이 게이트·EgressGuard 를 통해서만 수행한다.
  */
 import { config } from '../../config.js';
 
 export interface AiCallOpts { system: string; user: string; maxTokens?: number; temperature?: number }
 
 export function isAiConfigured(): boolean {
-  return !!config.ai.apiKey;
+  // 로컬 provider 는 로컬 엔드포인트라 벤더 키 없이도 활성(엔드포인트 부재 시 호출이 null 을 반환해 무중단).
+  return config.ai.local || !!config.ai.apiKey;
 }
 
-export function aiStatus(): { configured: boolean; provider: string; model: string } {
-  return { configured: isAiConfigured(), provider: config.ai.provider, model: config.ai.model };
+export function aiStatus(): { configured: boolean; provider: string; model: string; baseUrl: string; local: boolean } {
+  return { configured: isAiConfigured(), provider: config.ai.provider, model: config.ai.model, baseUrl: config.ai.baseUrl, local: config.ai.local };
 }
 
 /** 모델 호출 → 텍스트. 미구성/오류 시 null. */
@@ -26,9 +29,10 @@ export async function aiComplete(opts: AiCallOpts): Promise<string | null> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), config.ai.timeoutMs);
   try {
-    return config.ai.provider === 'openai'
-      ? await callOpenAi(opts, ctrl.signal)
-      : await callAnthropic(opts, ctrl.signal);
+    // anthropic 만 Messages API. openai·local 은 OpenAI 호환 Chat Completions 를 공유한다.
+    return config.ai.provider === 'anthropic'
+      ? await callAnthropic(opts, ctrl.signal)
+      : await callOpenAi(opts, ctrl.signal);
   } catch {
     return null;
   } finally {
@@ -97,9 +101,12 @@ async function callAnthropic(opts: AiCallOpts, signal: AbortSignal): Promise<str
 
 async function callOpenAi(opts: AiCallOpts, signal: AbortSignal): Promise<string | null> {
   const url = (config.ai.baseUrl || 'https://api.openai.com') + '/v1/chat/completions';
+  // 로컬 엔드포인트(Ollama 등)는 인증이 없다 — 키가 있을 때만 Authorization 헤더를 붙인다.
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (config.ai.apiKey) headers.authorization = `Bearer ${config.ai.apiKey}`;
   const res = await fetch(url, {
     method: 'POST', signal,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${config.ai.apiKey}` },
+    headers,
     body: JSON.stringify({
       model: config.ai.model,
       max_tokens: opts.maxTokens ?? config.ai.maxTokens,

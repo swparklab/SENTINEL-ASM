@@ -8,6 +8,21 @@ import path from 'node:path';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
+/**
+ * AI 제공자별 기본값 (설계 §5.3).
+ * `local` 은 사내/로컬 GPU 에서 구동하는 OpenAI 호환 엔드포인트(Ollama·vLLM·LM Studio 등)를 가리킨다.
+ * baseUrl 은 "/v1" 을 붙이기 전 호스트만 담는다(provider.ts 가 경로를 붙임). Ollama 기본 포트 11434.
+ * 로컬 provider 는 벤더 API 키가 필요 없다(엔드포인트가 로컬이므로). 모델은 태그명으로 지정.
+ */
+type AiProvider = 'anthropic' | 'openai' | 'local';
+const AI_PROVIDER = (process.env.SENTINEL_AI_PROVIDER ?? 'anthropic') as AiProvider;
+const AI_DEFAULTS: Record<AiProvider, { baseUrl: string; model: string }> = {
+  anthropic: { baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-6' },
+  openai: { baseUrl: 'https://api.openai.com', model: 'gpt-4o-mini' },
+  // 로컬 오케스트레이션 기본: Ollama + Qwen2.5-Coder 32B (tool/구조화 출력·보안추론 균형). vLLM 은 baseUrl 만 교체.
+  local: { baseUrl: process.env.SENTINEL_AI_BASE_URL ?? 'http://127.0.0.1:11434', model: 'qwen2.5-coder:32b' },
+};
+
 export const config = {
   port: Number(process.env.PORT ?? 8787),
   host: process.env.HOST ?? '0.0.0.0',
@@ -41,11 +56,18 @@ export const config = {
    */
   ai: {
     apiKey: process.env.SENTINEL_AI_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? process.env.OPENAI_API_KEY ?? '',
-    provider: (process.env.SENTINEL_AI_PROVIDER ?? 'anthropic') as 'anthropic' | 'openai',
-    model: process.env.SENTINEL_AI_MODEL ?? 'claude-sonnet-4-6',
-    baseUrl: process.env.SENTINEL_AI_BASE_URL ?? '',
+    provider: AI_PROVIDER,
+    model: process.env.SENTINEL_AI_MODEL ?? AI_DEFAULTS[AI_PROVIDER].model,
+    baseUrl: process.env.SENTINEL_AI_BASE_URL ?? AI_DEFAULTS[AI_PROVIDER].baseUrl,
+    /** 로컬 provider 는 로컬 엔드포인트라 벤더 키 없이도 활성(엔드포인트 부재 시 호출은 null 반환 → 무중단). */
+    local: AI_PROVIDER === 'local',
+    /**
+     * 로컬 provider 라도 오케스트레이터는 "계획·분석"만 한다(불변식 유지). 능동/파괴형 실행은 이 값과 무관하게
+     * authorizationGate + EgressGuard(allowStateChange) 게이트를 통과한 수동 pentest 경로만 수행한다.
+     * 즉 로컬모델 도입이 비파괴 불변식이나 게이트를 완화하지 않는다.
+     */
     maxProbes: Number(process.env.SENTINEL_AI_MAX_PROBES ?? 18),
-    timeoutMs: Number(process.env.SENTINEL_AI_TIMEOUT_MS ?? 30_000),
+    timeoutMs: Number(process.env.SENTINEL_AI_TIMEOUT_MS ?? (AI_PROVIDER === 'local' ? 120_000 : 30_000)),
     maxTokens: Number(process.env.SENTINEL_AI_MAX_TOKENS ?? 2048),
   },
 

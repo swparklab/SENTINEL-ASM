@@ -570,6 +570,54 @@ export const dastScanner: Scanner = {
           mr, 'meta refresh 대상이 사용자 입력으로 제어되지 않도록 하십시오.'),
           owasp: 'A01:2021', cwe: 'CWE-601', confidence: 'tentative' });
       }
+
+      // [30] 경로 트래버설 우회 변형 매트릭스 — 다중 인코딩·다중 파라미터·OS별 콘텐츠 시그니처
+      //      (안전: 파일 다운로드/변경 없이 콘텐츠 시그니처 매칭만. 파라미터당 1건이면 충분하므로 첫 적중 시 종료.)
+      let travFound = false;
+      for (const tp of TRAVERSAL_PARAMS.slice(0, 8)) {
+        if (travFound) break;
+        for (const pv of TRAVERSAL_PAYLOADS) {
+          const r = await ctx.guard.httpGet(`${base}/?${tp}=${pv.enc}`);
+          if (!r || !r.body || (isCatchAll && r.body === baseBody)) continue;
+          const hit = TRAVERSAL_SIGS.find((s) => s.re.test(r.body));
+          if (hit) {
+            findings.push({ ...mk('dast', 'critical', `경로 트래버설/LFI 가능성: ${tp} (${pv.how})`, ctx.asset.value,
+              `파라미터 '${tp}' 에 우회 변형(${pv.how}) 입력 시 ${hit.label} 내용이 응답에 나타납니다. 웹루트 밖 파일을 읽을 수 있는 표면입니다(파일 다운로드/변경 미수행, 콘텐츠 시그니처만 확인).`,
+              r.body.slice(0, 100).replace(/\s+/g, ' '),
+              '파일 경로 입력을 화이트리스트·정규화(realpath)로 검증하고 사용자 입력을 파일 경로에 직접 사용하지 마십시오.'),
+              owasp: 'A01:2021', cwe: 'CWE-22', confidence: 'firm',
+              references: ['https://owasp.org/www-community/attacks/Path_Traversal'] });
+            travFound = true;
+            break;
+          }
+        }
+      }
+
+      // [31] 예외처리 미흡 — 경계/비정상 입력에 5xx·스택트레이스·내부경로 노출 (입력 크기 제한, 비파괴)
+      //      정상 4xx/200 응답은 견고한 처리로 간주하고, 5xx 또는 상세 오류 노출만 보고한다.
+      for (const c of A10_INPUT_CASES) {
+        const r = await ctx.guard.httpGet(`${base}/?${c.qs}`);
+        if (!r) continue;
+        const st = matchStackTrace(r.body || '');
+        const ipath = matchInternalPath(r.body || '');
+        if (r.status >= 500 && r.status < 600) {
+          findings.push({ ...mk('dast', 'medium', `예외처리 미흡: 비정상 입력에 서버 오류(${r.status}) — ${c.how}`, ctx.asset.value,
+            `경계/비정상 입력(${c.how})에 서버가 ${r.status} 로 응답합니다. 입력 검증·예외 처리 누락으로 가용성 저하·정보 노출 위험이 있습니다.${st ? ` 스택트레이스(${st}) 동반 노출.` : ''}`,
+            `status=${r.status}${st ? `, stack=${st}` : ''}${ipath ? `, path=${ipath}` : ''}`,
+            '경계/비정상 입력을 중앙집중 검증하고 미처리 예외를 일반 오류 페이지로 처리하며 상세 오류를 숨기십시오.'),
+            owasp: 'A04:2021', cwe: 'CWE-755', confidence: st || ipath ? 'firm' : 'tentative',
+            references: ['https://cwe.mitre.org/data/definitions/755.html'] });
+          break;
+        }
+        if ((st || ipath) && !(isCatchAll && r.body === baseBody)) {
+          findings.push({ ...mk('dast', 'low', `예외처리 미흡: 비정상 입력에 상세 오류 노출 — ${c.how}`, ctx.asset.value,
+            `비정상 입력(${c.how})에 응답이 ${st ? `스택트레이스(${st})` : `내부 경로(${ipath})`}를 노출합니다. 처리되지 않은 예외 단서입니다.`,
+            st ? `stack=${st}` : `path=${ipath}`,
+            '미처리 예외를 잡아 일반 오류로 변환하고 내부 정보(스택/경로) 노출을 제거하십시오.'),
+            owasp: 'A04:2021', cwe: 'CWE-209', confidence: 'tentative' });
+          break;
+        }
+      }
     }
 
     // ── 전수 스크리닝(deep): 비파괴 크롤로 앱 전체 표면을 발견하고, 모든 파라미터에 동적 점검을 일괄 적용 ──
@@ -757,6 +805,43 @@ const BACKUP_PATHS: { path: string; label: string; sig: RegExp }[] = [
   { path: '/composer.json', label: 'composer.json', sig: /"require"\s*:|"autoload"\s*:/i },
   { path: '/package.json', label: 'package.json', sig: /"dependencies"\s*:|"scripts"\s*:/i },
   { path: '/.DS_Store', label: '.DS_Store', sig: /Bud1|\x00\x00\x00\x01Bud1/ },
+];
+
+/** 경로 트래버설을 받기 쉬운 파라미터명. */
+const TRAVERSAL_PARAMS: string[] = [
+  'file', 'path', 'page', 'doc', 'document', 'download', 'template',
+  'view', 'include', 'lang', 'dir', 'folder', 'load', 'read', 'src', 'f',
+];
+
+/** 경로 트래버설 우회 변형(인코딩/OS별). enc 는 그대로 쿼리값에 사용. */
+const TRAVERSAL_PAYLOADS: { how: string; enc: string }[] = [
+  { how: '단순 ../', enc: '../../../../../../etc/passwd' },
+  { how: '....// 우회', enc: '....//....//....//....//etc/passwd' },
+  { how: 'URL 인코딩', enc: '..%2f..%2f..%2f..%2f..%2fetc%2fpasswd' },
+  { how: '이중 인코딩', enc: '..%252f..%252f..%252fetc%252fpasswd' },
+  { how: '점 인코딩', enc: '%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd' },
+  { how: '널바이트 우회', enc: '../../../../../../etc/passwd%00.png' },
+  { how: '역슬래시(Win)', enc: '..%5c..%5c..%5c..%5cwindows%5cwin.ini' },
+  { how: 'Win 경로', enc: '../../../../../../windows/win.ini' },
+  { how: 'PHP 필터', enc: 'php://filter/convert.base64-encode/resource=index.php' },
+];
+
+/** 트래버설 적중 콘텐츠 시그니처(OS/래퍼별). */
+const TRAVERSAL_SIGS: { re: RegExp; label: string }[] = [
+  { re: /root:.*:0:0:/, label: '/etc/passwd' },
+  { re: /\[(?:fonts|extensions|mci extensions)\]/i, label: 'Windows win.ini' },
+  { re: /\[boot loader\]|\[operating systems\]/i, label: 'Windows boot.ini' },
+  { re: /PD9waHA|PD9wa[A-Za-z0-9+/]/, label: 'PHP 소스(php://filter base64)' },
+];
+
+/** 예외처리(A10) 점검용 경계/비정상 입력 케이스 — 입력 크기 제한(≤4KB), 비파괴. */
+const A10_INPUT_CASES: { how: string; qs: string }[] = [
+  { how: '배열 타입 혼동', qs: 'id[]=1&id[]=2' },
+  { how: '과대 정수', qs: 'page=999999999999999999999999999999' },
+  { how: '음수/지수 오버플로', qs: 'limit=-1&offset=-1e308' },
+  { how: '널바이트/제어문자', qs: 'q=%00%01%02%1f' },
+  { how: '과대 입력(4KB)', qs: 'q=' + 'A'.repeat(4096) },
+  { how: '깨진 멀티바이트 시퀀스', qs: 'q=%c0%ae%e0%80%af%ff%fe' },
 ];
 
 /** 템플릿 엔진 오류 시그니처(SSTI). */

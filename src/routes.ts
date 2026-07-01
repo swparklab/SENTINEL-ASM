@@ -376,15 +376,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const v = validate(z.object({
         target: z.string().min(1),
         attested: z.boolean(),
-        playbook: z.enum(['path-fuzz', 'auth-bypass', 'idor', 'sqli-probe', 'xss-probe', 'traversal-probe', 'method-audit']),
+        playbook: z.enum(['path-fuzz', 'auth-bypass', 'idor', 'sqli-probe', 'xss-probe', 'traversal-probe', 'method-audit', 'token-audit']),
         path: z.string().optional(),
         param: z.string().optional(),
+        /** token-audit 전용 — 본인 계정의 유효 세션/JWT 토큰(변형해 서버의 토큰 검증을 점검, 읽기전용). */
+        token: z.string().optional(),
       }), req.body);
       if (!v.ok) return reply.code(400).send({ error: 'bad_request', message: v.error });
       if (!v.data.attested) return reply.code(403).send({ error: 'attestation_required', message: '점검 권한 보유 확인(attestation)이 필요합니다.' });
       try {
         const at = authorizeTarget(req.auth!.tenantId, req.auth!.email, v.data.target, v.data.attested);
-        const findings = await runPlaybook(at, { playbook: v.data.playbook as PlaybookId, path: v.data.path, param: v.data.param }, { tenantId: req.auth!.tenantId, actor: req.auth!.email });
+        const findings = await runPlaybook(at, { playbook: v.data.playbook as PlaybookId, path: v.data.path, param: v.data.param, token: v.data.token }, { tenantId: req.auth!.tenantId, actor: req.auth!.email });
         const meta = PLAYBOOKS.find((p) => p.id === v.data.playbook);
         const job = recordPentestJob(at, meta?.name ?? v.data.playbook, findings, req.auth!.email);
         return reply.code(200).send({ host: at.host, playbook: v.data.playbook, jobId: job.id, findings: job.findings });

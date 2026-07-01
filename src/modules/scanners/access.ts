@@ -56,6 +56,10 @@ const BOT_AGENTS: { ua: string; label: string }[] = [
 
 const REF_A01 = ['https://owasp.org/Top10/A01_2021-Broken_Access_Control/', 'https://cwe.mitre.org/data/definitions/284.html'];
 const REF_BOT = ['https://owasp.org/www-project-automated-threats-to-web-applications/', 'https://www.rfc-editor.org/rfc/rfc9309'];
+const REF_A07 = ['https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/', 'https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html'];
+
+/** 로그인 폼 탐색용 흔한 경로(루트에 로그인 폼이 없을 때만 사용). */
+const LOGIN_PATHS = ['/login', '/signin', '/sign-in', '/account/login', '/user/login', '/users/sign_in', '/auth/login', '/wp-login.php', '/admin/login'];
 
 type Sev = Finding['severity'];
 type Conf = Finding['confidence'];
@@ -567,6 +571,15 @@ export const accessScanner: Scanner = {
       }
     }
 
+    // ── (확장 M) 인증 표면 비파괴 점검 — 로그인 폼 분석(제출/로그인 시도 없음, GET 파싱만) ──
+    if (ctx.deep) {
+      try {
+        findings.push(...await analyzeAuthSurface(ctx, base, host, root));
+      } catch (e) {
+        ctx.log(`access: 인증 표면 점검 오류 — ${(e as Error).message}`);
+      }
+    }
+
     // ─────────── (4) 비인가 API 개인정보·과다 노출 (실제 유출 사고 클래스) ───────────
     // "API 요청 시 개인정보를 무분별하게 제공하는 구조" — 관리자 페이지가 아니라 인증 없이 호출되는
     // 데이터 API 가 PII 를 그대로 반환하는 표면을 발견·분석한다. 비파괴(GET/HEAD/OPTIONS, 식별자 소량 표본).
@@ -716,6 +729,92 @@ function detectChallengeSignature(body: string, headers: Record<string, string>)
   if (/hcaptcha\.com|h-captcha/i.test(body)) return 'hCaptcha';
   if (/challenges\.cloudflare\.com\/turnstile|cf-turnstile/i.test(body)) return 'Cloudflare Turnstile';
   return null;
+}
+
+/**
+ * 인증 표면 비파괴 점검 — 로그인 폼을 찾아 HTML/헤더만 파싱한다.
+ * 로그인·자격증명 제출·브루트포스를 일절 수행하지 않으며, 외부에서 관측 가능한
+ * 인증 약점 단서(평문 전송·CSRF 부재·MFA 미관측·자동공격 완화 부재·기본 자격증명 노출)만 보고한다.
+ */
+async function analyzeAuthSurface(
+  ctx: ScanContext, base: string, host: string,
+  root: { status: number; body: string; headers: Record<string, string> },
+): Promise<Finding[]> {
+  const out: Finding[] = [];
+  const hasPwField = (b: string) => /type\s*=\s*["']password["']/i.test(b);
+
+  // 로그인 폼 후보 선택: 루트가 로그인 폼이면 그대로, 아니면 흔한 로그인 경로에서 탐색.
+  let loginUrl = base + '/';
+  let body = root.body || '';
+  let headers = root.headers;
+  if (!hasPwField(body)) {
+    let found = false;
+    for (const p of LOGIN_PATHS) {
+      const r = await ctx.guard.httpGet(base + p);
+      if (r && r.status === 200 && r.body && hasPwField(r.body)) {
+        loginUrl = base + p; body = r.body; headers = r.headers; found = true; break;
+      }
+    }
+    if (!found) return out; // 로그인 폼 미발견 — 점검 생략
+  }
+  const path = loginUrl.slice(base.length) || '/';
+  const formHtml = (body.match(/<form[\s\S]{0,3000}?<\/form>/i) || [])[0] || body;
+  const httpsAsset = ctx.asset.type !== 'host';
+
+  // M1) 자격증명 평문(HTTP) 전송 — form action 이 http:// 이거나 자산 자체가 평문 HTTP
+  const action = (formHtml.match(/<form[^>]*\baction\s*=\s*["']([^"']*)["']/i) || [])[1] || '';
+  const actionHttp = /^http:\/\//i.test(action);
+  if (actionHttp || !httpsAsset) {
+    out.push({ ...mk('access', actionHttp ? 'high' : 'medium', '로그인 자격증명 평문(HTTP) 전송 가능성', host + path,
+      actionHttp
+        ? '로그인 폼의 제출 대상(action)이 평문 http:// 입니다. 자격증명이 암호화 없이 전송될 수 있습니다.'
+        : '로그인 폼이 평문 HTTP 자산에서 제공됩니다. HTTPS 강제 없이 자격증명이 평문으로 전송될 위험이 있습니다(비파괴 관측).',
+      actionHttp ? `form action=${action.slice(0, 80)}` : `login form over http (asset=${host})`,
+      '로그인을 포함한 모든 인증 트래픽을 HTTPS 로 강제하고 HSTS 를 적용하십시오.'),
+      owasp: 'A02:2021', cwe: 'CWE-319', confidence: actionHttp ? 'firm' : 'tentative', references: REF_A07 });
+  }
+
+  // M2) 로그인 폼 CSRF 토큰 부재(+SameSite 부재) — 로그인 CSRF/세션 고정 표면
+  const hasCsrf = /name\s*=\s*["'][^"']*(csrf|_token|authenticity_token|__requestverificationtoken|xsrf)[^"']*["']/i.test(formHtml);
+  const setCookie = headers['set-cookie'] || '';
+  const sameSite = /;\s*samesite/i.test(setCookie);
+  if (!hasCsrf && !sameSite) {
+    out.push({ ...mk('access', 'low', '로그인 폼 CSRF 방어 부재 가능성', host + path,
+      '로그인 폼에 CSRF 토큰(숨은 필드)과 SameSite 쿠키가 모두 확인되지 않습니다. 로그인 CSRF(강제 로그인·세션 고정) 표면일 수 있습니다.',
+      'login form without csrf token / samesite', '로그인 폼에 동기화 토큰(CSRF)과 SameSite 쿠키를 적용하십시오.'),
+      owasp: 'A01:2021', cwe: 'CWE-352', confidence: 'tentative', references: REF_A07 });
+  }
+
+  // M3) 다단계 인증(MFA) 단서 미관측 — 후속 단계에 있을 수 있어 단정 불가(tentative)
+  const mfaHint = /(2fa|mfa|otp|one[\s-]?time|totp|authenticator|verification code|인증\s*코드|2단계|이중\s*인증|일회용\s*비밀번호)/i.test(body);
+  if (!mfaHint) {
+    out.push({ ...mk('access', 'info', '다단계 인증(MFA) 단서 미관측(로그인 페이지)', host + path,
+      '로그인 페이지에서 다단계 인증(MFA/2FA/OTP) 단서가 관측되지 않습니다. MFA 가 후속 단계에 있을 수 있어 단정은 어렵지만, 단일 자격증명 인증이면 계정 탈취 위험이 큽니다(비파괴 관측, 로그인 시도 없음).',
+      'no MFA/OTP markers on login page', '관리자·민감 계정에 MFA(TOTP/FIDO2 등)를 적용하십시오.'),
+      owasp: 'A07:2021', cwe: 'CWE-308', confidence: 'tentative', references: REF_A07 });
+  }
+
+  // M4) 로그인 자동공격(브루트포스/크리덴셜 스터핑) 완화 단서 부재 — CAPTCHA/챌린지 없음
+  const challenge = detectChallengeSignature(body, headers);
+  const captcha = /recaptcha|hcaptcha|turnstile|captcha/i.test(body);
+  if (!challenge && !captcha) {
+    out.push({ ...mk('access', 'low', '로그인 자동공격 완화 단서 부재(CAPTCHA/챌린지 없음)', host + path,
+      '로그인 페이지에 CAPTCHA/봇 챌린지가 관측되지 않습니다. 계정 잠금·레이트리밋이 없으면 브루트포스·크리덴셜 스터핑에 취약합니다(비파괴 관측, 로그인·브루트포스 미수행).',
+      'no captcha/challenge on login page', '로그인에 레이트리밋·계정 잠금·CAPTCHA(또는 위험기반 챌린지)를 적용하십시오.'),
+      owasp: 'A07:2021', cwe: 'CWE-307', confidence: 'tentative', references: REF_A07 });
+  }
+
+  // M5) HTML 주석 내 기본/테스트 자격증명 단서(오탐 억제: 주석 영역으로 한정)
+  const comments = [...body.matchAll(/<!--([\s\S]{0,400}?)-->/g)].map((m) => m[1]).join('\n');
+  const credHint = comments.match(/(?:pw|pass(?:word)?|비밀번호|비번)\s*[:=]\s*\S{3,}|(?:admin|test|demo|guest|root)\s*\/\s*(?:admin|test|demo|guest|root|1234|password|\w{3,8})/i);
+  if (credHint) {
+    out.push({ ...mk('access', 'medium', '기본/테스트 자격증명 단서 노출(로그인 페이지 주석)', host + path,
+      '로그인 페이지 HTML 주석에 기본·테스트 계정으로 보이는 자격증명 단서가 노출됩니다(로그인 시도는 수행하지 않음).',
+      credHint[0].slice(0, 80), '운영 페이지에서 테스트/기본 자격증명과 민감 주석을 제거하십시오.'),
+      owasp: 'A07:2021', cwe: 'CWE-1392', confidence: 'tentative', references: REF_A07 });
+  }
+
+  return out;
 }
 
 /** Set-Cookie 의 JWT 페이로드(2번째 세그먼트)를 비파괴로 디코딩해 클레임 객체를 반환. */
